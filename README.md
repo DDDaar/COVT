@@ -47,6 +47,7 @@
 ## 🔥 News
 
 [2025-11-22] ⭐️ The evaluation and Gradio demo are available NOW!
+
 [2025-11-21] 🤗 Our finetuned weights are available. [Check it here!](https://huggingface.co/collections/Wakals/covt-chain-of-visual-thought)
 
 ## 📑 Table of Contents
