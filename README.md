@@ -129,6 +129,8 @@ A collection of CoVT models on Hugging Face with benchmark performance:
 |Qwen2.5-VL-7B-Instruct| ✔ | ✔ | ✔ | ✔ | 7B (+1B) | 79.8    | 🤗 [HuggingFace](https://huggingface.co/Wakals/CoVT-7B-seg_depth_dino_edge) |
 |LLaVA-v1.5-13B        |   | ✔ |   |   | 13B (+1B)| 59.9    | 🤗 [HuggingFace](https://huggingface.co/Wakals/CoVT-LLaVA-13B-depth) |
 
+> `+1B` denotes the parameters of the projection layer for decoding the visual thinking tokens. We don't nned these parameters during inference!
+
 ## 🏖️ TODO
 
 - [x] Release our model weights on Hugging Face.
