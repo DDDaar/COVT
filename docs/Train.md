@@ -65,7 +65,7 @@ Make sure that `<image>` appears at the beginning of the first row in `conversat
 
 ## Training
 
-The training process consists of four stages.  
+The training process consists of four stages. By using `4 x A6000`, they use around `20 hours` in total.
 The first stage is the **understanding stage**, after which we perform the first LoRA merge.  
 The second stage is the **generation stage**, the third stage is the **reasoning stage**, and the fourth stage is the **efficient reasoning stage**.  
 After completing all stages, we merge the LoRA parameters again.  

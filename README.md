@@ -182,5 +182,13 @@ If you're running into code or implementation issues, the best way is to open an
 If you use this work in your research, please cite:
 
 ```
-coming soon...
+@misc{qin2025chainofvisualthoughtteachingvlmsthink,
+  title={Chain-of-Visual-Thought: Teaching VLMs to See and Think Better with Continuous Visual Tokens},
+  author={Yiming Qin and Bomin Wei and Jiaxin Ge and Konstantinos Kallidromitis and Stephanie Fu and Trevor Darrell and XuDong Wang},
+  year={2025},
+  eprint={2511.19418},
+  archivePrefix={arXiv},
+  primaryClass={cs.CV},
+  url={https://arxiv.org/abs/2511.19418}
+}
 ```

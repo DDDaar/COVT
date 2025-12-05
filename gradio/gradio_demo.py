@@ -81,6 +81,7 @@ def run_single_inference(
     temperature: float = 0.0,
     top_p: float = 0.9,
     do_sample: bool = False,
+    seed: int = 42,
 ):
     """
     Single inference: given one image and one question, return answer and elapsed time.
@@ -129,6 +130,17 @@ def run_single_inference(
         for k, v in inputs.items()
     }
 
+    # 3.5) Set random seed and generator for reproducibility when sampling
+    seed = int(seed)
+    torch.manual_seed(seed)
+    if torch.cuda.is_available():
+        torch.cuda.manual_seed_all(seed)
+    try:
+        generator = torch.Generator(device=device)
+    except TypeError:
+        generator = torch.Generator()
+    generator.manual_seed(seed)
+
     # 4) Timing + generation
     if device.type == "cuda":
         torch.cuda.empty_cache()
@@ -142,6 +154,7 @@ def run_single_inference(
             temperature=temperature,
             top_p=top_p,
             do_sample=do_sample,
+            generator=generator,
             pad_token_id=processor.tokenizer.eos_token_id,
             eos_token_id=processor.tokenizer.eos_token_id,
         )
@@ -165,6 +178,7 @@ def gradio_inference(
     max_new_tokens,
     temperature,
     top_p,
+    seed,
 ):
     """
     Wrapper function for Gradio that calls the inference logic and returns answer + time cost.
@@ -185,6 +199,7 @@ def gradio_inference(
         temperature=float(temperature),
         top_p=float(top_p),
         do_sample=(temperature > 0.0),
+        seed=int(seed),
     )
 
     return answer, elapsed
@@ -203,7 +218,7 @@ def build_demo():
             with gr.Column():
                 image_input = gr.Image(
                     label="Input Image",
-                    type="pil"  # 使用 PIL，避免文件路径搬运限制
+                    type="pil"
                 )
                 question_input = gr.Textbox(
                     label="Question",
@@ -231,8 +246,14 @@ def build_demo():
                     value=0.9,
                     step=0.01
                 )
+                seed = gr.Slider(
+                    label="random_seed",
+                    minimum=0,
+                    maximum=1000,
+                    value=42,
+                    step=1
+                )
 
-                # ----- Examples (点击后填充到输入组件) -----
                 gr.Markdown("### Example")
                 example_image_path = os.path.abspath(
                     os.path.join(os.path.dirname(__file__), "..", "assets", "clouds.png")
@@ -263,7 +284,7 @@ def build_demo():
 
         run_button.click(
             fn=gradio_inference,
-            inputs=[image_input, question_input, max_new_tokens, temperature, top_p],
+            inputs=[image_input, question_input, max_new_tokens, temperature, top_p, seed],
             outputs=[answer_output, elapsed_output]
         )
 
