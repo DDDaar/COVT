@@ -289,4 +289,31 @@ class UnfreezeLoRACallback(TrainerCallback):
                 if "lora_" in n:
                     p.requires_grad = True
             kwargs["model"].print_trainable_parameters()
+
+
+class ResumeDatasetCallback(TrainerCallback):
+    """
+    Callback is to sync the cur_step of the Dataset when resuming training from checkpoint.
+    
+    When training is resumed from checkpoint, global_step is correctly loaded, but the cur_step of the Dataset is default to 0. This callback will detect whether the training is resumed, and if so, calculate and set the correct cur_step based on global_step.
+    
+    The formula for calculation: resumed_cur_step = global_step * batch_size * gradient_accumulation_steps
+    """
+    
+    def __init__(self, train_dataset):
+        self.train_dataset = train_dataset
+        self._resumed = False
+    
+    def on_train_begin(self, args, state, control, **kwargs):
+        if state.global_step > 0 and not self._resumed:
+            samples_per_step = args.per_device_train_batch_size * args.gradient_accumulation_steps
+            resumed_cur_step = state.global_step * samples_per_step
+            
+            self.train_dataset.set_cur_step(resumed_cur_step)
+            self._resumed = True
+            
+            print(f"[ResumeDatasetCallback] Resumed training from global_step={state.global_step}")
+            print(f"[ResumeDatasetCallback] Dataset cur_step set to {resumed_cur_step}")
+            print(f"[ResumeDatasetCallback] (batch_size={args.per_device_train_batch_size}, "
+                  f"grad_accum={args.gradient_accumulation_steps})")
             

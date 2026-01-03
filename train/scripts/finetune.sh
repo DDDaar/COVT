@@ -1,7 +1,10 @@
 #!/usr/bin/env bash
 set -e
 
-export CUDA_VISIBLE_DEVICES=0,1,2,3,4,5,6,7
+GPU_IDS="0,1,2,3,4,5,6,7"
+NUM_DEVICES=$(echo "$GPU_IDS" | tr ',' '\n' | wc -l)
+BATCH_PER_DEVICE=1
+GLOBAL_BATCH_SIZE=8
 
 BASE_MODEL="Qwen/Qwen2.5-VL-7B-Instruct"
 
@@ -20,6 +23,10 @@ VISUAL_MODEL_ID="['sam', 'depth', 'dino']"
 echo "==== [1/4] First stage training: max_steps=6000 ===="
 MODEL_NAME="$BASE_MODEL" \
 MODEL_PATH="$BASE_MODEL" \
+GPU_IDS="$GPU_IDS" \
+NUM_DEVICES="$NUM_DEVICES" \
+BATCH_PER_DEVICE="$BATCH_PER_DEVICE" \
+GLOBAL_BATCH_SIZE="$GLOBAL_BATCH_SIZE" \
 OUTPUT_DIR="$OUT_DIR_STAGE1" \
 RUN_NAME="stage1_train" \
 STAGE_0_STEP=6000 \
@@ -46,6 +53,10 @@ echo "==== [3/4] Joint training of stage 2/3/4: max_steps=10000 ===="
 
 MODEL_NAME="$MERGED_STAGE1_MODEL" \
 MODEL_PATH="$MERGED_STAGE1_MODEL" \
+GPU_IDS="$GPU_IDS" \
+NUM_DEVICES="$NUM_DEVICES" \
+BATCH_PER_DEVICE="$BATCH_PER_DEVICE" \
+GLOBAL_BATCH_SIZE="$GLOBAL_BATCH_SIZE" \
 OUTPUT_DIR="$OUT_DIR_STAGE234" \
 RUN_NAME="stage234_train" \
 STAGE_0_STEP=0 \

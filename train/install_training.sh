@@ -17,4 +17,7 @@ pip install git+https://github.com/facebookresearch/segment-anything.git
 echo ">>> Installing Depth Anything v2"
 pip install -r src/anchors/DepthAnything/requirements.txt
 
+echo ">>> Installing XFormers"
+pip install xformers==0.0.29.post1
+
 echo ">>> Installation finished."

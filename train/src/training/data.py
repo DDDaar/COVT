@@ -427,6 +427,10 @@ class SupervisedDataset(Dataset):
         
         if shuffle:
             self.rng.shuffle(self.list_data_dict)
+    
+    def set_cur_step(self, step: int):
+        self.cur_step = step
+        print(f"[Dataset] cur_step has been set to {step}")
         
     def __len__(self):
         return len(self.list_data_dict)

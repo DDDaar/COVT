@@ -1,0 +1,1 @@
+{"seg_loss": 1.9349733591079712, "_timestamp": 1767433147.8634887, "_runtime": 18.477895736694336, "_step": 3, "dino_loss": 1.09375, "depth_loss": 1.131899356842041, "train/loss": 5.9061, "train/grad_norm": 757.9669732414496, "train/learning_rate": 6.833333333333333e-06, "train/epoch": 0.0005293942954536651, "train/global_step": 41, "_wandb": {"runtime": 26}}

@@ -3,7 +3,7 @@ import torch
 from peft import LoraConfig, get_peft_model
 import ast
 from transformers import AutoProcessor, BitsAndBytesConfig, HfArgumentParser
-from training.trainer import QwenTrainer, UnfreezeLoRACallback
+from training.trainer import QwenTrainer, UnfreezeLoRACallback, ResumeDatasetCallback
 from training.data import make_supervised_data_module
 from training.params import DataArguments, ModelArguments, TrainingArguments
 from training.train_utils import get_peft_state_maybe_zero_3, get_peft_state_non_lora_maybe_zero_3, safe_save_model_for_hf_trainer
@@ -351,10 +351,13 @@ def train():
                                               data_args=data_args,
                                               anchor_model_id=anchor_model_id)
     
+    resume_callback = ResumeDatasetCallback(train_dataset=data_module['train_dataset'])
+    
     trainer = QwenTrainer(
         model=model,
         processor=processor,
         args=training_args,
+        callbacks=[resume_callback],
         **data_module
     )
     # model.print_trainable_parameters()
