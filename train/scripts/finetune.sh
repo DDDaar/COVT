@@ -1,12 +1,16 @@
 #!/usr/bin/env bash
 set -e
 
-GPU_IDS="0,1,2,3,4,5,6,7"
+GPU_IDS="0,1,2,3,4,5"
 NUM_DEVICES=$(echo "$GPU_IDS" | tr ',' '\n' | wc -l)
-BATCH_PER_DEVICE=1
-GLOBAL_BATCH_SIZE=8
 
-BASE_MODEL="Qwen/Qwen2.5-VL-7B-Instruct"
+# 6卡训练
+BATCH_PER_DEVICE=1
+GLOBAL_BATCH_SIZE=6
+
+export PYTHONPATH=$PYTHONPATH:$(pwd)
+
+BASE_MODEL="Qwen/Qwen2.5-VL-3B-Instruct"
 
 OUT_DIR_STAGE1="output/lora_vision_test/lora_stage1"
 MERGED_STAGE1_MODEL="output/lora_merged/lora_stage1_merged"
@@ -14,9 +18,9 @@ MERGED_STAGE1_MODEL="output/lora_merged/lora_stage1_merged"
 OUT_DIR_STAGE234="output/lora_vision_test/lora_stage234"
 FINAL_MERGED_MODEL="output/lora_merged/lora_stage234_merged"
 
-DATA_PATH="dataset/covt_dataset.json"
-IMAGE_FOLDER="dataset/image_dir"
-
+DATA_PATH="/home/ma-user/work/lbx/CoVT/CoVT_data/data.json"
+IMAGE_FOLDER="/home/ma-user/work/lbx/CoVT/CoVT_data/images"
+# /home/ma-user/work/lbx/CoVT/CoVT-Dataset
 VISUAL_MODEL_ID="['sam', 'depth', 'dino']"
 
 

@@ -210,3 +210,6 @@ __marimo__/
 /train/output/
 /train/scripts/*backup*
 /train/wandb/
+
+CoVT_data/*
+train/src/anchors/dinov2/*

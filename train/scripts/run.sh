@@ -4,7 +4,11 @@ MODEL_NAME="${MODEL_NAME:-Qwen/Qwen2.5-VL-7B-Instruct}"
 MODEL_PATH="${MODEL_PATH:-Qwen/Qwen2.5-VL-7B-Instruct}"
 
 export MASTER_PORT="${MASTER_PORT:-22810}"
+
 export CUDA_VISIBLE_DEVICES="${GPU_IDS:-0,1,2,3,4,5,6,7}"
+export ASCEND_VISIBLE_DEVICES="${GPU_IDS:-0,1,2,3,4,5,6,7}"
+export ASCEND_RT_VISIBLE_DEVICES="${GPU_IDS:-0,1,2,3,4,5,6,7}"
+
 export PYTHONPATH=src:$PYTHONPATH
 export WANDB_PROJECT="${WANDB_PROJECT:-Qwen_BASE}"
 RUN_NAME="${RUN_NAME:-test_setup}"
@@ -29,10 +33,12 @@ IMAGE_FOLDER="${IMAGE_FOLDER:-dataset/image_dir}"
 
 VISUAL_MODEL_ID="${VISUAL_MODEL_ID:-['sam', 'depth', 'dino']}"
 
+
+##########################liger、flash_attn2、tf32、zero2
 deepspeed \
     --master_port $MASTER_PORT \
     src/training/train.py \
-    --use_liger True \
+    --use_liger False \
     --lora_enable True \
     --vision_lora True \
     --use_dora False \
@@ -51,7 +57,7 @@ deepspeed \
     --tune_merger False \
     --bf16 True \
     --fp16 False \
-    --disable_flash_attn2 False \
+    --disable_flash_attn2 True \
     --output_dir "$OUTPUT_DIR" \
     --max_steps "$MAX_STEPS" \
     --per_device_train_batch_size $BATCH_PER_DEVICE \
@@ -66,14 +72,14 @@ deepspeed \
     --warmup_ratio 0.05 \
     --lr_scheduler_type "cosine" \
     --logging_steps 1 \
-    --tf32 True \
+    --tf32 False \
     --gradient_checkpointing True \
     --lazy_preprocess True \
     --save_strategy "steps" \
     --save_steps 1000 \
     --save_total_limit 1 \
     --dataloader_num_workers 0 \
-    --deepspeed scripts/zero3.json \
+    --deepspeed scripts/zero2.json \
     --report_to wandb \
     --run_name "${RUN_NAME}" \
     --anchor_model_id "$VISUAL_MODEL_ID" \

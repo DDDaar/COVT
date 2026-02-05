@@ -422,15 +422,36 @@ class AnchorModels():
             self.sam.eval()
             self.sam_predictor = SamPredictor(self.sam)
             self.mask_generator = SamAutomaticMaskGenerator(self.sam)
+
         if "dino" in self.anchor_model_id:
-            self.dinovit = torch.hub.load(DINO_MODEL_PATH, DINO_MODEL_TYPE)
+        # 1. 定义本地路径
+            DINO_REPO_PATH = "/home/ma-user/work/lbx/CoVT/train/src/anchors/dinov2"  # 你克隆的仓库路径
+            DINO_CKPT_PATH = "/home/ma-user/work/lbx/CoVT/train/src/anchors/dinov2/checkpoints/dinov2/dinov2_vitl14_pretrain.pth"
+            
+            # 2. 方式 A: 仍然使用 torch.hub 但指向本地文件夹 (最简单)
+            self.dinovit = torch.hub.load(DINO_REPO_PATH, DINO_MODEL_TYPE, source='local', pretrained=False)
+            
+            # 3. 加载本地权重
+            state_dict = torch.load(DINO_CKPT_PATH, map_location='cpu')
+            self.dinovit.load_state_dict(state_dict)
+            
             self.dinovit = self.dinovit.eval()
+
             self.extracted_outputs = {}
             def norm_hook(module, module_input, module_output):
                 self.extracted_outputs["norm_output"] = module_output
             self.hook_handle = self.dinovit.norm.register_forward_hook(norm_hook)
             self.dino_processor = AutoImageProcessor.from_pretrained(**DINO_PROCESSOR_CONFIG)
             self.tat_loss = TaTDistillLoss(student_dim=1024, teacher_dim=1024, patch_group=True, group_size=8)
+        # if "dino" in self.anchor_model_id:
+        #     self.dinovit = torch.hub.load(DINO_MODEL_PATH, DINO_MODEL_TYPE)
+        #     self.dinovit = self.dinovit.eval()
+        #     self.extracted_outputs = {}
+        #     def norm_hook(module, module_input, module_output):
+        #         self.extracted_outputs["norm_output"] = module_output
+        #     self.hook_handle = self.dinovit.norm.register_forward_hook(norm_hook)
+        #     self.dino_processor = AutoImageProcessor.from_pretrained(**DINO_PROCESSOR_CONFIG)
+        #     self.tat_loss = TaTDistillLoss(student_dim=1024, teacher_dim=1024, patch_group=True, group_size=8)
         if "depth" in self.anchor_model_id:
             self.depth_model = DepthAnythingV2(**DEPTH_MODEL_CONFIG)
             self.depth_model.load_state_dict(torch.load(DEPTH_CHECKPOINT, map_location='cpu'))
@@ -966,37 +987,40 @@ class CoVTForConditionalGeneration(Qwen2_5_VLPreTrainedModel, GenerationMixin):
         self.siglip_token_idx = None
         self.metaclip_token_idx = None
         
-        self.sam_projection = nn.Linear(3584, 256)
+        ###################################注意隐藏层维度，7b是3584
+        hidden_dim = 2048
+
+        self.sam_projection = nn.Linear(hidden_dim, 256)
         self.sam_query_vectors = nn.Parameter(torch.randn(8, 256, dtype=torch.bfloat16, requires_grad=True))
         self.sam_cross_attention = nn.MultiheadAttention(embed_dim=256, num_heads=8, batch_first=True)
-        self.dino_projection = nn.Linear(3584, 1024)
+        self.dino_projection = nn.Linear(hidden_dim, 1024)
         self.dino_query_vectors = nn.Parameter(torch.randn(1025, 1024, dtype=torch.bfloat16, requires_grad=True))
         self.dino_cross_attention = nn.MultiheadAttention(embed_dim=1024, num_heads=8, batch_first=True)
-        self.depth_projection = nn.Linear(3584, 1024)
+        self.depth_projection = nn.Linear(hidden_dim, 1024)
         self.depth_query_vectors = nn.Parameter(torch.randn(1369, 1024, dtype=torch.bfloat16, requires_grad=True))
         self.depth_cross_attention = nn.MultiheadAttention(embed_dim=1024, num_heads=8, batch_first=True)
         self.depth_token_generator = nn.Sequential(
-            nn.Linear(3584, 3584),
+            nn.Linear(hidden_dim, hidden_dim),
             nn.GELU(),
-            nn.Linear(3584, 1024)
+            nn.Linear(hidden_dim, 1024)
         )
-        self.SD_projection = nn.Linear(3584, 4096)
+        self.SD_projection = nn.Linear(hidden_dim, 4096)
         self.SD_query_vectors = nn.Parameter(torch.randn(4, 4096, dtype=torch.bfloat16, requires_grad=True))
         self.SD_cross_attention = nn.MultiheadAttention(embed_dim=4096, num_heads=8, batch_first=True)
-        self.internvit_projection = nn.Linear(3584, 1024)
+        self.internvit_projection = nn.Linear(hidden_dim, 1024)
         self.internvit_query_vectors = nn.Parameter(torch.randn(1025, 1024, dtype=torch.bfloat16, requires_grad=True))
         self.internvit_cross_attention = nn.MultiheadAttention(embed_dim=1024, num_heads=8, batch_first=True)
-        self.pidinet_projection = nn.Linear(3584, 60)
+        self.pidinet_projection = nn.Linear(hidden_dim, 60)
         self.pidinet_query_vectors = nn.Parameter(torch.randn(4, 60, dtype=torch.bfloat16, requires_grad=True))
         self.pidinet_cross_attention = nn.MultiheadAttention(embed_dim=60, num_heads=4, batch_first=True)
-        self.siglip_projection = nn.Linear(3584, 1024)
+        self.siglip_projection = nn.Linear(hidden_dim, 1024)
         self.siglip_query_vectors = nn.Parameter(torch.randn(1, 1024, dtype=torch.bfloat16, requires_grad=True))
         self.siglip_cross_attention = nn.MultiheadAttention(embed_dim=1024, num_heads=8, batch_first=True)
-        self.metaclip_projection = nn.Linear(3584, 1024)
+        self.metaclip_projection = nn.Linear(hidden_dim, 1024)
         self.metaclip_query_vectors = nn.Parameter(torch.randn(1, 1024, dtype=torch.bfloat16, requires_grad=True))
         self.metaclip_cross_attention = nn.MultiheadAttention(embed_dim=1024, num_heads=8, batch_first=True)
         
-        # self.SD_token_projection = nn.Linear(3584, 64*64)
+        # self.SD_token_projection = nn.Linear(hidden_dim, 64*64)
         
     def get_anchor_model_ids(self, anchor_model_id):
         self.anchor_model_id = anchor_model_id

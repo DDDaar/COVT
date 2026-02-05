@@ -1,5 +1,6 @@
 import os
 import torch
+from torch_npu.contrib import transfer_to_npu
 from peft import LoraConfig, get_peft_model
 import ast
 from transformers import AutoProcessor, BitsAndBytesConfig, HfArgumentParser
@@ -8,7 +9,14 @@ from training.data import make_supervised_data_module
 from training.params import DataArguments, ModelArguments, TrainingArguments
 from training.train_utils import get_peft_state_maybe_zero_3, get_peft_state_non_lora_maybe_zero_3, safe_save_model_for_hf_trainer
 import pathlib
-from liger_kernel.transformers import apply_liger_kernel_to_qwen2_vl
+
+
+
+# from liger_kernel.transformers import apply_liger_kernel_to_qwen2_vl
+
+
+
+
 from monkey_patch_forward import replace_qwen2_5_with_mixed_modality_forward, replace_qwen_2_with_mixed_modality_forward
 
 from training.covt_qwen2_5_vl import CoVTForConditionalGeneration
