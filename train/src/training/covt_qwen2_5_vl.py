@@ -480,7 +480,7 @@ class AnchorModels():
             self.pidinet = pidinet_model.pidinet_converted(args)
             # self.pidinet = torch.nn.DataParallel(self.pidinet).cuda()
             if PIDINET_MODEL_PATH is not None:
-                pidinet_checkpoint = torch.load(PIDINET_MODEL_PATH, map_location='cpu')
+                pidinet_checkpoint = torch.load(PIDINET_MODEL_PATH, map_location='cpu',weights_only=False)
                 pidonet_state_dict = pidinet_checkpoint['state_dict'] if 'state_dict' in pidinet_checkpoint else pidinet_checkpoint
                 pidonet_state_dict = {k.replace('module.', ''): v for k, v in pidonet_state_dict.items()}
                 self.pidinet.load_state_dict(convert_pidinet(pidonet_state_dict, args.config))
