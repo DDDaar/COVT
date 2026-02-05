@@ -55,6 +55,12 @@ def set_requires_grad(parameters, requires_grad):
         p.requires_grad = requires_grad
         
 def set_anchor_requires_grad(model, anchor_model_id):
+    
+    # 1. Projection Layer（投影层）
+    # 2.Cross-Attention（交叉注意力）
+    # 3.Query Vectors（查询向量）
+    # 深度模态多了一个depth_token_generator，可能是：深度图特有的特征提取器/深度信息的特殊编码器
+    
     # set_requires_grad(model.sam_projection.parameters(), True)
     # set_requires_grad(model.dino_projection.parameters(), True)
     # set_requires_grad(model.depth_projection.parameters(), True)
@@ -164,7 +170,8 @@ def train():
         (ModelArguments, DataArguments, TrainingArguments))
     
     model_args, data_args, training_args = parser.parse_args_into_dataclasses()
-    
+
+    # 将字符串形式的数据结构转换为对应的Python数据结构
     anchor_model_id = ast.literal_eval(model_args.anchor_model_id)
     
     if model_args.model_path is None:
@@ -175,6 +182,7 @@ def train():
     replace_qwen2_5_with_mixed_modality_forward(use_liger=training_args.use_liger)\
     
 
+    ### 检查lora和参数冻结初始化情况
     if training_args.lora_enable and not training_args.freeze_llm:
         raise ValueError("If `lora_enable` is True, `freeze_llm` must also be True.")
 
@@ -197,6 +205,7 @@ def train():
     local_rank = training_args.local_rank
     compute_dtype = (torch.float16 if training_args.fp16 else (torch.bfloat16 if training_args.bf16 else torch.float32))
 
+    # 量化配置（bitsandbytes）
     bnb_model_from_pretrained_args = {}
     if training_args.bits in [4,8]:
         bnb_model_from_pretrained_args.update(dict(
@@ -213,6 +222,7 @@ def train():
             )
         ))
 
+    # 模型初始化和相关配置
     model = CoVTForConditionalGeneration.from_pretrained(
         model_args.model_path,
         torch_dtype=compute_dtype,
@@ -231,7 +241,8 @@ def train():
     
     # Set requires_grad for the Anchor projection layers
     set_anchor_requires_grad(model, anchor_model_id)
-    
+
+    # 量化模型训练准备
     if training_args.bits in [4,8]:
         model.config.torch_dtype = (torch.float32 if training_args.fp16 else (torch.bfloat16 if training_args.bf16 else torch.float32))
         from peft import prepare_model_for_kbit_training
@@ -241,6 +252,7 @@ def train():
         model.enable_input_require_grads()
         training_args.gradient_checkpointing_kwargs = {"use_reentrant": True}
 
+    # 获取基础的 LoRA 排除列表，如果是 LLaVA 模型，额外排除多模态投影器和视觉模块（因为这些通常需要单独配置或冻结）
     if training_args.lora_enable:
         lora_namespan_exclude = training_args.lora_namespan_exclude
         if "llava" in model_args.model_id:
@@ -252,6 +264,8 @@ def train():
             lora_dropout=training_args.lora_dropout,
             bias=training_args.lora_bias
         )
+        
+        # 得到peft模型
         if training_args.bits == 16:
             if training_args.bf16:
                 model.to(torch.bfloat16)
@@ -259,7 +273,8 @@ def train():
                 model.to(torch.float16)
         rank0_print("Adding LoRA to the model...")
         model = get_peft_model(model, peft_config)
-        
+
+        # 视觉专家似乎都要训练？
         for name, param in model.named_parameters():
             if '_projection' in name:
                 param.requires_grad = True
@@ -282,8 +297,12 @@ def train():
         
     # add special tokens
     add_tokens = [SAM_PAD_TOKEN, DINO_PAD_TOKEN, DEPTH_PAD_TOKEN, SD_PAD_TOKEN, INTERN_PAD_TOKEN, PIDINET_PAD_TOKEN, SIGLIP_PAD_TOKEN, METACLIP_PAD_TOKEN, "<think>", "</think>", "<answer>", "</answer>"]
+
+    # 似乎有的是special token，有的是普通token，全部的特征提取token都是加为普通token
     processor.tokenizer.add_special_tokens({"additional_special_tokens": [ANCHOR_START_TOKEN, ANCHOR_END_TOKEN]})
     processor.tokenizer.add_tokens(add_tokens)
+
+    # 得到各个token对应的id
     sam_token_idx = processor.tokenizer(SAM_PAD_TOKEN, add_special_tokens=False).input_ids[0]
     dino_token_idx = processor.tokenizer(DINO_PAD_TOKEN, add_special_tokens=False).input_ids[0]
     depth_token_idx = processor.tokenizer(DEPTH_PAD_TOKEN, add_special_tokens=False).input_ids[0]
@@ -297,7 +316,8 @@ def train():
     splash_think_idx = processor.tokenizer("</think>", add_special_tokens=False).input_ids[0]
     answer_idx = processor.tokenizer("<answer>", add_special_tokens=False).input_ids[0]
     splash_answer_idx = processor.tokenizer("</answer>", add_special_tokens=False).input_ids[0]
-    
+
+    # 获取embedding层？
     qwen_embed = model.get_input_embeddings()
     lm_head = model.get_output_embeddings()
     p = qwen_embed.weight
@@ -307,12 +327,15 @@ def train():
     else:
         old_len = p.data.shape[0]
     new_len = len(processor.tokenizer)
-    
+
+    # 传递token索引给模型，告诉模型每个anchor token对应的id，让模型知道如何处理这些特殊token
     model.get_anchor_token_idx(sam_token_idx, dino_token_idx, depth_token_idx, sd_token_idx, intern_token_idx, pidinet_token_idx, siglip_token_idx, metaclip_token_idx)
+
     
     if "llava" in model_args.model_id:
         configure_llava_vision_tower(model_to_configure, model_args, training_args, compute_dtype, processor)
-        
+
+    # 强制embedding层和lm_head可训练 
     for n, p in model.named_parameters():
         if any(
             [
@@ -327,7 +350,9 @@ def train():
             ]
         ):
             p.requires_grad = True
-    
+
+
+    # 只有新token的embedding被更新，旧的不应该改变
     _mask = torch.ones(old_len, device=model.device, dtype=torch.bool)
     _mask[:] = False
     _mask[old_processor_len:new_len] = True
@@ -336,10 +361,13 @@ def train():
         if grad is None:
             return grad
         return grad * _mask.to(grad.device).view(-1, 1)
-    
+        
+    # 将hook注册到嵌入层的权重上，这样每次反向传播计算梯度时都会调用这个hook。
     model.get_input_embeddings().weight.register_hook(row_mask_hook)
     model.get_output_embeddings().weight.register_hook(row_mask_hook)
 
+
+    # 当使用4位或8位量化时，模型权重被压缩存储，但在计算时需要转换为更高精度
     if training_args.bits in [4, 8]:
         from peft.tuners.lora import LoraLayer
         for name, module in model.named_modules():
@@ -354,6 +382,7 @@ def train():
                     if training_args.bf16 and module.weight.dtype == torch.float32:
                         module = module.to(torch.bfloat16)
 
+    # 数据构造、resume函数
     data_module = make_supervised_data_module(model_id=model_args.model_id,
                                               processor=processor,
                                               data_args=data_args,
@@ -370,6 +399,7 @@ def train():
     )
     # model.print_trainable_parameters()
 
+    # 如果有checkpoint存在，会自动找到最新的checkpoint继续训练
     if list(pathlib.Path(training_args.output_dir).glob("checkpoint-*")):
         trainer.train(resume_from_checkpoint=True)
     else:
@@ -380,6 +410,11 @@ def train():
     model.config.use_cache = True
     
     if training_args.lora_enable:
+        
+        # - 分离LoRA参数
+        # - 保存LoRA适配器
+        # - 保存非LoRA参数
+        
         state_dict = get_peft_state_maybe_zero_3(
             model.named_parameters(), training_args.lora_bias
         )
@@ -389,9 +424,9 @@ def train():
         )
 
         if local_rank == 0 or local_rank == -1:
-            model.config.save_pretrained(training_args.output_dir)
-            model.save_pretrained(training_args.output_dir, state_dict=state_dict)
-            torch.save(non_lora_state_dict, os.path.join(training_args.output_dir, "non_lora_state_dict.bin"))
+            model.config.save_pretrained(training_args.output_dir)  # 配置文件保存
+            model.save_pretrained(training_args.output_dir, state_dict=state_dict)  # LoRA适配器保存
+            torch.save(non_lora_state_dict, os.path.join(training_args.output_dir, "non_lora_state_dict.bin"))  # 非LoRA参数保存
     else:
         safe_save_model_for_hf_trainer(trainer, output_dir=training_args.output_dir)
 
