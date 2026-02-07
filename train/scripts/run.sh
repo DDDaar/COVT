@@ -76,7 +76,7 @@ deepspeed \
     --gradient_checkpointing True \
     --lazy_preprocess True \
     --save_strategy "steps" \
-    --save_steps 1000 \
+    --save_steps 500 \
     --save_total_limit 1 \
     --dataloader_num_workers 0 \
     --deepspeed scripts/zero2.json \

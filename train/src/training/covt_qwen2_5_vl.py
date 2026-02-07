@@ -987,7 +987,7 @@ class CoVTForConditionalGeneration(Qwen2_5_VLPreTrainedModel, GenerationMixin):
         self.siglip_token_idx = None
         self.metaclip_token_idx = None
         
-        ###################################注意隐藏层维度，7b是3584
+        ###################################注意隐藏层维度，7b是3584,3b是2048
         hidden_dim = 2048
 
         self.sam_projection = nn.Linear(hidden_dim, 256)

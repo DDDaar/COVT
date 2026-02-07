@@ -1,12 +1,12 @@
 #!/usr/bin/env bash
 set -e
 
-GPU_IDS="0,1,2,3,4,5"
+GPU_IDS="0,1,2,3,4,5,6,7"
 NUM_DEVICES=$(echo "$GPU_IDS" | tr ',' '\n' | wc -l)
 
 # 6卡训练
 BATCH_PER_DEVICE=1
-GLOBAL_BATCH_SIZE=6
+GLOBAL_BATCH_SIZE=8
 
 export PYTHONPATH=$PYTHONPATH:$(pwd)
 
@@ -44,7 +44,13 @@ VISUAL_MODEL_ID="$VISUAL_MODEL_ID" \
 bash scripts/run.sh
 
 
-echo "==== [2/4] First merge LoRA ===="
+# STAGE_0_STEP=6000 \
+# STAGE_1_STEP=6000 \
+# STAGE_2_STEP=6000 \
+# VQA_ONLY_STAGE=6000 \
+# MAX_STEPS=6000 \
+
+# echo "==== [2/4] First merge LoRA ===="
 
 MODEL_NAME="$BASE_MODEL" \
 MODEL_PATH="$OUT_DIR_STAGE1" \
@@ -73,6 +79,12 @@ IMAGE_FOLDER="$IMAGE_FOLDER" \
 VISUAL_MODEL_ID="$VISUAL_MODEL_ID" \
 bash scripts/run.sh
 
+
+# STAGE_0_STEP=0 \
+# STAGE_1_STEP=3000 \
+# STAGE_2_STEP=6000 \
+# VQA_ONLY_STAGE=8000 \
+# MAX_STEPS=10000 \
 
 echo "==== [4/4] Second merge LoRA (final) ===="
 
