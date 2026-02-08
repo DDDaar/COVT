@@ -213,3 +213,5 @@ __marimo__/
 
 CoVT_data/*
 train/src/anchors/dinov2/*
+train/output_7btest_maybeok/
+train/log.txt
