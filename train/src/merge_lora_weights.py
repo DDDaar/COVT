@@ -2,6 +2,8 @@ import argparse
 from utils import get_model_name_from_path, load_pretrained_model
 import ast
 
+
+# 使用utils.py中的代码进行lora参数合并
 def merge_lora(args, anchor_model_id):
     model_name = get_model_name_from_path(args.model_path)
     processor, model = load_pretrained_model(model_path=args.model_path, model_base=args.model_base,

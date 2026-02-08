@@ -4,6 +4,8 @@ from typing import Optional
 from transformers import TrainingArguments
 
 
+
+### 模型参数
 @dataclass
 class ModelArguments:
     model_id: Optional[str] = field(default="Qwen/Qwen2.5-VL-7B-Instruct")
@@ -22,7 +24,7 @@ class ModelArguments:
     mm_use_im_patch_token: bool = field(default=False, metadata={"help": "Mm use im patch token"})
     mm_use_im_start_end: bool = field(default=False, metadata={"help": "Mm use im start end"})
     
-
+### 训练参数
 @dataclass
 class TrainingArguments(TrainingArguments):
     cache_dir: Optional[str] = field(default=None)
@@ -76,6 +78,7 @@ class TrainingArguments(TrainingArguments):
     vqa_only_stage: int = field(default=4000, metadata={"help": "VQA only stage."})
 
 
+### 数据参数
 @dataclass
 class DataArguments:
     data_path: str = field(

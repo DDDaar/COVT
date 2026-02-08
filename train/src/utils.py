@@ -8,6 +8,7 @@ import json
 from src.training.covt_qwen2_5_vl import CoVTForConditionalGeneration
 from src.training.constants import *
 
+### 为PyTorch中的torch.nn.Linear类动态添加一个名为reset_parameters的方法，该方法被设置为一个什么都不做的空函数。
 def disable_torch_init():
     """
     Disable the redundant torch default initialization to accelerate model creation.
@@ -20,6 +21,7 @@ def load_pretrained_model(model_path, model_base, model_name, load_8bit=False, l
                           device_map="auto", device="cuda", use_flash_attn=False, anchor_model_id=None, **kwargs):
     kwargs = {"device_map": device_map}
     
+    #"" 表示默认键，所有模型层都放到指定设备
     if device != "cuda":
         kwargs['device_map'] = {"":device}
     
@@ -28,8 +30,8 @@ def load_pretrained_model(model_path, model_base, model_name, load_8bit=False, l
     elif load_4bit:
         kwargs['quantization_config'] = BitsAndBytesConfig(
             load_in_4bit=True,
-            bnb_4bit_compute_dtype=torch.float16,
-            bnb_4bit_use_double_quant=True,
+            bnb_4bit_compute_dtype=torch.float16, 
+            bnb_4bit_use_double_quant=True, # 双重量化
             bnb_4bit_quant_type='nf4'
         )
     else:
@@ -44,6 +46,8 @@ def load_pretrained_model(model_path, model_base, model_name, load_8bit=False, l
         lora_cfg_pretrained = AutoConfig.from_pretrained(model_path)
         if hasattr(lora_cfg_pretrained, 'quantization_config'):
             del lora_cfg_pretrained.quantization_config
+
+        # 尝试加载处理器，如果失败则查找最新的checkpoint目录。
         try:
             processor = AutoProcessor.from_pretrained(model_path)
             print('Loading Processor from model path...')
@@ -59,11 +63,14 @@ def load_pretrained_model(model_path, model_base, model_name, load_8bit=False, l
             print(f"Loading anchor model ids: {anchor_model_id}")
             model.get_anchor_model_ids(anchor_model_id)
         
+        # 获取当前词表参数，词表扩展
         token_num, tokem_dim = model.lm_head.out_features, model.lm_head.in_features
+        # 
         if model.lm_head.weight.shape[0] != token_num:
             model.lm_head.weight = torch.nn.Parameter(torch.empty(token_num, tokem_dim, device=model.device, dtype=model.dtype))
             model.model.embed_tokens.weight = torch.nn.Parameter(torch.empty(token_num, tokem_dim, device=model.device, dtype=model.dtype))
 
+        # 键名清理,清除前缀
         print('Loading additional Qwen2.5-VL weights...')
         non_lora_trainables = torch.load(os.path.join(model_path, 'non_lora_state_dict.bin'), map_location='cpu')
         non_lora_trainables = {(k[11:] if k.startswith('base_model.') else k): v for k, v in non_lora_trainables.items()}
@@ -71,6 +78,8 @@ def load_pretrained_model(model_path, model_base, model_name, load_8bit=False, l
             non_lora_trainables = {(k[6:] if k.startswith('model.') else k): v for k, v in non_lora_trainables.items()}
         model.load_state_dict(non_lora_trainables, strict=False)
     
+        # 将基础模型包装为PeftModel，添加LoRA适配器；
+        # from_pretrained：自动从adapter_model.bin加载LoRA权重
         print('Loading LoRA weights...')
         model = PeftModel.from_pretrained(model, model_path)
 
@@ -94,6 +103,7 @@ def load_pretrained_model(model_path, model_base, model_name, load_8bit=False, l
     return processor, model
 
 
+# 根据路径得到模型名字（ckpk or base模型）
 def get_model_name_from_path(model_path):
     model_path = model_path.strip("/")
     model_paths = model_path.split("/")

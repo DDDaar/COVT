@@ -45,10 +45,12 @@ class QwenTrainer(Trainer):
         super(QwenTrainer, self).__init__(*args, **kwargs)
         self.processor = processor
         
+    # 仅仅加了一个打印，原样调用父类方法
     def evaluation_loop(self, dataloader, description, prediction_loss_only = None, ignore_keys = None, metric_key_prefix = "eval"):
         print("I got it! Maybe for future usage")
         return super().evaluation_loop(dataloader, description, prediction_loss_only, ignore_keys, metric_key_prefix)
 
+    # 为模型的不同部分设置不同的学习率（Learning Rate）和权重衰减（Weight Decay）策略
     def create_optimizer(self):
         """
         Setup the optimizer.
@@ -63,6 +65,7 @@ class QwenTrainer(Trainer):
         opt_model = self.model
 
         if self.optimizer is None:
+            # ALL_LAYERNORM_LAYERS是排除层（LayerNorm）和bias相关参数
             decay_parameters = get_parameter_names(opt_model, ALL_LAYERNORM_LAYERS)
             projection_parameters = [name for name in decay_parameters if ("_projection" in name or "query_vectors" in name or "cross_attention" in name)]
             decay_parameters = [name for name in decay_parameters if "bias" not in name]
@@ -70,6 +73,7 @@ class QwenTrainer(Trainer):
             visual_parameters = []
             merger_parameters = []
 
+            # 特殊层学习率（visual、merger）
             if self.args.vision_lr is not None:
                 lr_mapper["visual"] = self.args.vision_lr
                 visual_parameters = [name for name, _ in opt_model.named_parameters() if "visual" in name and "merger" not in name]
@@ -77,20 +81,22 @@ class QwenTrainer(Trainer):
                 lr_mapper["merger"] = self.args.merger_lr
                 merger_parameters = [name for name, _ in opt_model.named_parameters() if "merger" in name]
 
+            # 将模型参数拆分成多个字典，每个字典可以有自己的 lr 和 weight_decay 
             if len(lr_mapper) > 0:
                 special_lr_parameters = merger_parameters + visual_parameters
                 
                 optimizer_grouped_parameters = [
                     {
                         "params": [p for n, p in opt_model.named_parameters() if (n in decay_parameters and n not in special_lr_parameters and p.requires_grad)],
-                        "weight_decay": self.args.weight_decay,
+                        "weight_decay": self.args.weight_decay, #普通参数 (LLM主体)，应用 Weight Decay
                     },
                     {
                         "params": [p for n, p in opt_model.named_parameters() if (n not in decay_parameters and n not in special_lr_parameters and p.requires_grad)],
-                        "weight_decay": 0.0,
+                        "weight_decay": 0.0,  #普通参数 (LLM主体 Bias/LN)，不应用 Weight Decay
                     },
                 ]
                 
+                # 如果设置了视觉LR，添加视觉参数组
                 if visual_parameters: 
                     optimizer_grouped_parameters.extend(
                         [
@@ -107,6 +113,7 @@ class QwenTrainer(Trainer):
                         ]
                     )
                 
+                # 5. 如果设置了 Merger LR，添加连接层参数组
                 if merger_parameters: 
                     optimizer_grouped_parameters.extend(
                         [
@@ -126,26 +133,30 @@ class QwenTrainer(Trainer):
                 optimizer_grouped_parameters = [
                     {
                         "params": [p for n, p in opt_model.named_parameters() if (n in decay_parameters and p.requires_grad and n not in projection_parameters)],
-                        "weight_decay": self.args.weight_decay,
+                        "weight_decay": self.args.weight_decay,#在可衰减参数中(普通权重，不包括偏置、LayerNorm等)，但不是投影层参数.
                     },
                     {
                         "params": [p for n, p in opt_model.named_parameters() if (n in decay_parameters and p.requires_grad and n in projection_parameters)],
                         "weight_decay": self.args.weight_decay,
-                        "lr": self.args.projection_layer_lr,
+                        "lr": self.args.projection_layer_lr, #既是可衰减参数，又是投影层参数
                     },
                     {
                         "params": [p for n, p in opt_model.named_parameters() if (n not in decay_parameters and p.requires_grad and n not in projection_parameters)],
-                        "weight_decay": 0.0,
+                        "weight_decay": 0.0, #不可衰减参数，且不是投影层参数
                     },
                     {
                         "params": [p for n, p in opt_model.named_parameters() if (n not in decay_parameters and p.requires_grad and n in projection_parameters)],
                         "weight_decay": 0.0,
-                        "lr": self.args.projection_layer_lr,
+                        "lr": self.args.projection_layer_lr, #不可衰减参数，但属于投影层
                     },
                 ]
+
+            # 6. 初始化优化器 (支持 bitsandbytes 8-bit 优化器)
             optimizer_cls, optimizer_kwargs = Trainer.get_optimizer_cls_and_kwargs(self.args)
 
             self.optimizer = optimizer_cls(optimizer_grouped_parameters, **optimizer_kwargs)
+
+            # 将Embedding层的权重排除在8位优化之外，强制使用32位浮点数进行优化
             if optimizer_cls.__name__ == "Adam8bit":
                 import bitsandbytes
 
@@ -185,6 +196,7 @@ class QwenTrainer(Trainer):
     
 
     def _save_checkpoint(self, model, trial):
+        # 单独保存基础模型的非LoRA参数和adapter权重，训练过程中的检查点保存
         if self.args.lora_enable:
             checkpoint_folder = f"{PREFIX_CHECKPOINT_DIR}-{self.state.global_step}"
 
@@ -223,6 +235,7 @@ class QwenTrainer(Trainer):
         else:
             super(QwenTrainer, self)._save_checkpoint(model, trial)
 
+    #最终的模型导出保存
     def _save(self, output_dir: Optional[str] = None, state_dict=None):
             # If we are executing this function, we are the process zero, so we don't check for that.
             output_dir = output_dir if output_dir is not None else self.args.output_dir
@@ -271,6 +284,9 @@ class QwenTrainer(Trainer):
     
     
 class UnfreezeLoRACallback(TrainerCallback):
+    # 在训练初期先“冻结” LoRA 参数，等到特定的步数（unfreeze_step）再开启训练
+    # 这通常用于 “预热” 阶段。例如，如果你在训练初期只想让某些非 LoRA 层
+    # （如 Embedding 或 Head）先适应数据，或者为了让优化器在激活低秩适配器之前先平稳度过初始的高梯度区。
     def __init__(self, unfreeze_step):
         self.unfreeze_step = unfreeze_step
         self.lora_lr = None
@@ -292,6 +308,8 @@ class UnfreezeLoRACallback(TrainerCallback):
 
 
 class ResumeDatasetCallback(TrainerCallback):
+    # 训练中断后重启，确保数据不重复/不乱序
+    # 调用 self.train_dataset.set_cur_step()，手动将数据集的指针拨到正确的位置，确保模型不会重新读取已经学过的旧数据。
     """
     Callback is to sync the cur_step of the Dataset when resuming training from checkpoint.
     

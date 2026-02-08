@@ -4,6 +4,8 @@ import logging
 
 
 def maybe_zero_3(param, ignore_status=False, name=None):
+    ### 参数detach后收集
+
     from deepspeed import zero
     from deepspeed.runtime.zero.partition_parameters import ZeroParamStatus
     if hasattr(param, "ds_id"):
@@ -13,11 +15,15 @@ def maybe_zero_3(param, ignore_status=False, name=None):
         with zero.GatheredParameters([param]):
             param = param.data.detach().cpu().clone()
     else:
+
+        # 临时将所有GPU上的参数分片收集到当前GPU，然后在当前GPU上执行复制到CPU的操作
         param = param.detach().cpu().clone()
     return param
 
 # Borrowed from peft.utils.get_peft_model_state_dict
 def get_peft_state_maybe_zero_3(named_params, bias):
+    # 从模型的命名参数中筛选出PEFT相关的参数（LoRA参数和可选的bias参数），并确保它们被正确转移到CPU内存，适配zero3。
+    # 似乎有bug
     if bias == "none":
         to_return = {k: t for k, t in named_params if "lora_" in k}
     elif bias == "all":
@@ -43,6 +49,7 @@ def get_peft_state_maybe_zero_3(named_params, bias):
 
 
 def get_peft_state_non_lora_maybe_zero_3(named_params, require_grad_only=True):
+    ### 获取非LoRA参数的状态字典
     to_return = {k: t for k, t in named_params if "lora_" not in k}
     if require_grad_only:
         to_return = {k: t for k, t in to_return.items() if t.requires_grad}

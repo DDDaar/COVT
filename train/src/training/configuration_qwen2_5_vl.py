@@ -23,9 +23,16 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
+
+
+############################### 参数配置，在covt_qwen2_5_vl.py中用到
+
+
 from transformers.configuration_utils import PretrainedConfig
 from transformers.modeling_rope_utils import rope_config_validation
 
+
+# 主要包含两个核心类：Qwen2_5_VLVisionConfig（视觉编码器配置）和 Qwen2_5_VLConfig（主模型配置）。
 
 class Qwen2_5_VLVisionConfig(PretrainedConfig):
     model_type = "qwen2_5_vl"
@@ -175,6 +182,8 @@ class Qwen2_5_VLConfig(PretrainedConfig):
     sub_configs = {"vision_config": Qwen2_5_VLVisionConfig}
     keys_to_ignore_at_inference = ["past_key_values"]
     # Default tensor parallel plan for base model `Qwen2_5_VL`
+
+    # 默认的tp和pp模型划分方式，升维的时候W列划分，降维的时候W行划分。W是逻辑W
     base_model_tp_plan = {
         "layers.*.self_attn.q_proj": "colwise",
         "layers.*.self_attn.k_proj": "colwise",
@@ -184,6 +193,7 @@ class Qwen2_5_VLConfig(PretrainedConfig):
         "layers.*.mlp.up_proj": "colwise",
         "layers.*.mlp.down_proj": "rowwise",
     }
+    # pp格式说明： (输入参数列表, 输出参数列表)
     base_model_pp_plan = {
         "embed_tokens": (["input_ids"], ["inputs_embeds"]),
         "layers": (["hidden_states", "attention_mask"], ["hidden_states"]),
