@@ -21,8 +21,11 @@ if __name__ == "__main__":
     parser.add_argument("--safe-serialization", action='store_true')
     parser.add_argument("--anchor-model-id", type=str, required=True)
     
+    
+    
     args = parser.parse_args()
-
+    print(f'加载的基础模型路径是{args.model_base}')
+    
     anchor_model_id = ast.literal_eval(args.anchor_model_id)
 
     merge_lora(args, anchor_model_id)

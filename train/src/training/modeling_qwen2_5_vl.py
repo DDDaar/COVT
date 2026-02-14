@@ -28,6 +28,7 @@ import math
 from dataclasses import dataclass
 from typing import Any, Dict, List, Optional, Tuple, Union
 
+
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
@@ -41,6 +42,12 @@ from sklearn.metrics.pairwise import cosine_similarity
 import numpy as np
 import os
 
+# ACT2FN：激活函数映射表。
+# Cache 相关类：支持 KV-Cache 的多种缓存策略。
+# GenerationMixin：生成任务混合类。
+# AttentionMaskConverter：注意力掩码工具。
+# BaseModelOutputWithPast 等：标准输出格式。
+# ROPE_INIT_FUNCTIONS：旋转位置编码初始化函数。
 from transformers.activations import ACT2FN
 from transformers.cache_utils import Cache, DynamicCache, SlidingWindowCache, StaticCache
 from transformers.generation import GenerationMixin
@@ -79,7 +86,7 @@ logger = logging.get_logger(__name__)
 
 _CONFIG_FOR_DOC = "Qwen2_5_VLConfig"
 
-
+# Qwen2_5_VLMLP 模块（多层感知机）
 class Qwen2_5_VLMLP(nn.Module):
     def __init__(self, config, bias: bool = False):
         super().__init__()
@@ -93,7 +100,8 @@ class Qwen2_5_VLMLP(nn.Module):
     def forward(self, hidden_state):
         return self.down_proj(self.act_fn(self.gate_proj(hidden_state)) * self.up_proj(hidden_state))
 
-
+    
+# 将视频或图像序列划分为时空块，并嵌入为高维向量。
 class Qwen2_5_VisionPatchEmbed(nn.Module):
     def __init__(
         self,
@@ -113,13 +121,16 @@ class Qwen2_5_VisionPatchEmbed(nn.Module):
 
     def forward(self, hidden_states: torch.Tensor) -> torch.Tensor:
         target_dtype = self.proj.weight.dtype
+        # 输入形态：其形状会被整理为 (k, 3, 2, 14, 14)。
         hidden_states = hidden_states.view(
             -1, self.in_channels, self.temporal_patch_size, self.patch_size, self.patch_size
         )
+        # 最后，输出会被展平为 (Tokens, 1152)。在这个例子中，输出就是 (1, 1152)。
         hidden_states = self.proj(hidden_states.to(dtype=target_dtype)).view(-1, self.embed_dim)
         return hidden_states
 
 
+    # rope准备（seqlen,dim//2）
 class Qwen2_5_VisionRotaryEmbedding(nn.Module):
     def __init__(self, dim: int, theta: float = 10000.0) -> None:
         super().__init__()
@@ -131,7 +142,7 @@ class Qwen2_5_VisionRotaryEmbedding(nn.Module):
         freqs = torch.outer(seq, self.inv_freq)
         return freqs
 
-
+# rms norm
 class Qwen2RMSNorm(nn.Module):
     def __init__(self, hidden_size, eps=1e-6):
         """
@@ -151,7 +162,8 @@ class Qwen2RMSNorm(nn.Module):
     def extra_repr(self):
         return f"{tuple(self.weight.shape)}, eps={self.variance_epsilon}"
 
-
+# merger
+# 将视觉特征图中的相邻像素（Patches）进行空间上的合并与压缩，从而减少序列长度并提取更高层次的特征。
 class Qwen2_5_VLPatchMerger(nn.Module):
     def __init__(self, dim: int, context_dim: int, spatial_merge_size: int = 2) -> None:
         super().__init__()
@@ -218,13 +230,16 @@ class Qwen2_5_VLVisionFlashAttention2(nn.Module):
         return attn_output
 
 
+#将一个向量 $x$ 拆分为两部分，并进行如下变换：
+# 如果原始向量为 $[x_1, x_2, ..., x_{n/2}, x_{n/2+1}, ..., x_n]$，
+# 变换后的结果为 $[-x_{n/2+1}, ..., -x_n, x_1, x_2, ..., x_{n/2}]$。
 def rotate_half(x):
     """Rotates half the hidden dims of the input."""
     x1 = x[..., : x.shape[-1] // 2]
     x2 = x[..., x.shape[-1] // 2 :]
     return torch.cat((-x2, x1), dim=-1)
 
-
+#################！！！！！！！！！！！！！！！！！！！！！rope
 def apply_rotary_pos_emb_vision(
     q: torch.Tensor, k: torch.Tensor, cos: torch.Tensor, sin: torch.Tensor
 ) -> Tuple[torch.Tensor, torch.Tensor]:
@@ -239,6 +254,7 @@ def apply_rotary_pos_emb_vision(
     return q_embed, k_embed
 
 
+# 完整的包含rope的attention实现
 class Qwen2_5_VLVisionAttention(nn.Module):
     def __init__(self, dim: int, num_heads: int = 16) -> None:
         super().__init__()
@@ -255,6 +271,7 @@ class Qwen2_5_VLVisionAttention(nn.Module):
         position_embeddings: Optional[Tuple[torch.Tensor, torch.Tensor]] = None,
     ) -> torch.Tensor:
         seq_length = hidden_states.shape[0]
+        #将输入的 hidden_states 投影。使用 reshape 将结果拆分为 $Q$、$K$、$V$。unbind(0) 将张量沿第一维拆开，直接赋值给 q, k, v 变量
         q, k, v = self.qkv(hidden_states).reshape(seq_length, 3, self.num_heads, -1).permute(1, 0, 2, 3).unbind(0)
         if position_embeddings is None:
             logger.warning_once(
@@ -268,11 +285,16 @@ class Qwen2_5_VLVisionAttention(nn.Module):
             sin = emb.sin()
         else:
             cos, sin = position_embeddings
+        # rope
         q, k = apply_rotary_pos_emb_vision(q, k, cos, sin)
 
+        
+        #打包处理：为了效率，模型会将多张图像的补丁拼接成一个超长的 hidden_states（即 seq_length 是所有图像补丁的总和）。
+        #cu_seqlens (Cumulative Sequence Lengths)：记录了每张图像在长序列中的起始和结束位置。
+        #分块 Mask：通过循环，将同一张图像内部的注意力权重设为 0（表示可见），而图像之间的区域保留极小值（-inf），从而防止图像之间互相产生注意力干扰。
         attention_mask = torch.full(
             [1, seq_length, seq_length], torch.finfo(q.dtype).min, device=q.device, dtype=q.dtype
-        )
+        )  # 获取q张量数据类型的理论最小值
         for i in range(1, len(cu_seqlens)):
             attention_mask[..., cu_seqlens[i - 1] : cu_seqlens[i], cu_seqlens[i - 1] : cu_seqlens[i]] = 0
 
@@ -325,13 +347,16 @@ class Qwen2_5_VLVisionSdpaAttention(nn.Module):
         q = q.transpose(0, 1)
         k = k.transpose(0, 1)
         v = v.transpose(0, 1)
+        
+        #sdpa，使用torch实现的注意力，而不是手动计算
+        
         attn_output = F.scaled_dot_product_attention(q, k, v, attention_mask, dropout_p=0.0)
         attn_output = attn_output.transpose(0, 1)
         attn_output = attn_output.reshape(seq_length, -1)
         attn_output = self.proj(attn_output)
         return attn_output
 
-
+# 三种注意力机制
 QWEN2_5_VL_VISION_ATTENTION_CLASSES = {
     "eager": Qwen2_5_VLVisionAttention,
     "flash_attention_2": Qwen2_5_VLVisionFlashAttention2,
@@ -339,6 +364,7 @@ QWEN2_5_VL_VISION_ATTENTION_CLASSES = {
 }
 
 
+# 视觉模块，rmsnorm
 class Qwen2_5_VLVisionBlock(nn.Module):
     def __init__(self, config, attn_implementation: str = "sdpa") -> None:
         super().__init__()
@@ -356,6 +382,7 @@ class Qwen2_5_VLVisionBlock(nn.Module):
         rotary_pos_emb: Optional[torch.Tensor] = None,
         position_embeddings: Optional[Tuple[torch.Tensor, torch.Tensor]] = None,
     ) -> torch.Tensor:
+        # pre-norm
         hidden_states = hidden_states + self.attn(
             self.norm1(hidden_states),
             cu_seqlens=cu_seqlens,
@@ -382,7 +409,7 @@ Qwen2_5_VL_START_DOCSTRING = r"""
             [`~PreTrainedModel.from_pretrained`] method to load the model weights.
 """
 
-
+# 将上面定义的详细说明字符串挂载到下方的类（通常是 Qwen2_5_VLModel）上
 @add_start_docstrings(
     "The bare Qwen2_5_VL Model outputting raw hidden-states without any specific head on top.",
     Qwen2_5_VL_START_DOCSTRING,
@@ -391,13 +418,15 @@ class Qwen2_5_VLPreTrainedModel(PreTrainedModel):
     config_class = Qwen2_5_VLConfig
     base_model_prefix = "model"
     supports_gradient_checkpointing = True
+    # 列表中的模块（如 DecoderLayer 和 VisionBlock）在进行多显卡分布式部署时，严禁被切分到不同的显卡
     _no_split_modules = ["Qwen2_5_VLDecoderLayer", "Qwen2_5_VLVisionBlock"]
     _skip_keys_device_placement = "past_key_values"
     _supports_flash_attn_2 = True
     _supports_sdpa = True
     _supports_cache_class = True
     _supports_static_cache = False  # TODO (joao): fix. torch.compile failing probably due to `cache_positions`
-
+    
+    # 正态分布初始化
     def _init_weights(self, module):
         std = self.config.initializer_range
         if isinstance(module, (nn.Linear, nn.Conv3d)):
@@ -408,6 +437,7 @@ class Qwen2_5_VLPreTrainedModel(PreTrainedModel):
             module.weight.data.normal_(mean=0.0, std=std)
             if module.padding_idx is not None:
                 module.weight.data[module.padding_idx].zero_()
+
 
 
 class Qwen2_5_VisionTransformerPretrainedModel(Qwen2_5_VLPreTrainedModel):
@@ -422,6 +452,8 @@ class Qwen2_5_VisionTransformerPretrainedModel(Qwen2_5_VLPreTrainedModel):
         self.window_size = config.window_size
         self.spatial_merge_unit = self.spatial_merge_size * self.spatial_merge_size
 
+        #patch_embed: 传统的 ViT 将图像切成固定大小的 Patch。这里的 Qwen2_5_VisionPatchEmbed 支持 3D 卷积（处理 temporal_patch_size），
+        #这意味着它可以同时处理静态图像和连续的视频帧。
         self.patch_embed = Qwen2_5_VisionPatchEmbed(
             patch_size=config.patch_size,
             temporal_patch_size=config.temporal_patch_size,
@@ -432,9 +464,12 @@ class Qwen2_5_VisionTransformerPretrainedModel(Qwen2_5_VLPreTrainedModel):
         head_dim = config.hidden_size // config.num_heads
         self.rotary_pos_emb = Qwen2_5_VisionRotaryEmbedding(head_dim // 2)
 
+        #blocks (Transformer Layers): 模型包含多个 Qwen2_5_VLVisionBlock。值得注意的是，
+        #这些 Block 分为两类：全注意力（Full Attention）和窗口注意力（Window Attention）
         self.blocks = nn.ModuleList(
             [Qwen2_5_VLVisionBlock(config, config._attn_implementation) for _ in range(config.depth)]
         )
+        #在视觉特征输入 LLM 之前，会进行空间上的压缩（通常是 $2 \times 2$ 像素合并为一个特征点），以减少 Token 数量，提升推理速度。 
         self.merger = Qwen2_5_VLPatchMerger(
             dim=config.out_hidden_size,
             context_dim=config.hidden_size,
@@ -443,18 +478,28 @@ class Qwen2_5_VisionTransformerPretrainedModel(Qwen2_5_VLPreTrainedModel):
         self.gradient_checkpointing = False
 
     def rot_pos_emb(self, grid_thw):
+        #grid_thw: 形状为 (B, 3) 的张量，其中每行包含 (t, h, w)，表示批次中每个样本的时间、高度、宽度维度
         pos_ids = []
         for t, h, w in grid_thw:
+            # 创建 h×w 的矩阵，每行都是相同的行索引
+            # 例如 h=4,w=3: [[0,0,0], [1,1,1], [2,2,2], [3,3,3]]
             hpos_ids = torch.arange(h).unsqueeze(1).expand(-1, w)
+            
+            # 将矩阵按 spatial_merge_size 分块
+            # 假设 spatial_merge_size=2，h=4,w=4:
+            # 形状从 (4,4) -> (2,2,2,2)
             hpos_ids = hpos_ids.reshape(
                 h // self.spatial_merge_size,
                 self.spatial_merge_size,
                 w // self.spatial_merge_size,
                 self.spatial_merge_size,
             )
+            # 调整维度顺序：将同一空间块内的位置放在一起
+            # 从 (块行, 块内行, 块列, 块内列) -> (块行, 块列, 块内行, 块内列)
             hpos_ids = hpos_ids.permute(0, 2, 1, 3)
             hpos_ids = hpos_ids.flatten()
-
+    
+            #宽度位置ID生成
             wpos_ids = torch.arange(w).unsqueeze(0).expand(h, -1)
             wpos_ids = wpos_ids.reshape(
                 h // self.spatial_merge_size,
@@ -464,30 +509,50 @@ class Qwen2_5_VisionTransformerPretrainedModel(Qwen2_5_VLPreTrainedModel):
             )
             wpos_ids = wpos_ids.permute(0, 2, 1, 3)
             wpos_ids = wpos_ids.flatten()
+            
+            # 将高度和宽度ID堆叠为 (N, 2)，其中N=h*w
+            # 然后按时间维度t重复，得到 (t*N, 2)
             pos_ids.append(torch.stack([hpos_ids, wpos_ids], dim=-1).repeat(t, 1))
+        # 将所有样本的位置ID拼接，形状为 (总token数, 2)
         pos_ids = torch.cat(pos_ids, dim=0)
+        # 获取所有样本中最大的空间维度（高度或宽度的最大值）
         max_grid_size = grid_thw[:, 1:].max()
+        # 获取预计算的完整旋转位置编码
         rotary_pos_emb_full = self.rotary_pos_emb(max_grid_size)
+        # 通过索引选择对应的位置编码，并展平
         rotary_pos_emb = rotary_pos_emb_full[pos_ids].flatten(1)
         return rotary_pos_emb
 
+    #该函数将输入的视频特征网格（temporal × height × width）划分为固定大小的窗口，生成：
+    #窗口索引：每个有效特征点在原始序列中的位置索引
+    #累积序列长度：用于记录每个窗口的有效token数量累积和
+    #########
+    # 对于 224x224 的图像：它先被划分为 $16 \times 16 = 256$ 个 patch。
+    # 通过 spatial_merge（2x2 合 1），变成 $8 \times 8 = 64$ 个 token。
+    # 这段代码再把这 64 个 token 划分为 4 个 $4 \times 4$ 的窗口。目的：让大模型在做 Attention 时，
+    # 不是一次性看全图 64 个点，而是分窗口看，提高处理超大规模图像（如 4K 视频）时的效率。
     def get_window_index(self, grid_thw):
+        
         window_index: list = []
         cu_window_seqlens: list = [0]
         window_index_id = 0
         vit_merger_window_size = self.window_size // self.spatial_merge_size // self.patch_size
 
         for grid_t, grid_h, grid_w in grid_thw:
+            #将原始特征图下采样到LLM（大语言模型）输入的空间维度
             llm_grid_h, llm_grid_w = (
                 grid_h // self.spatial_merge_size,
                 grid_w // self.spatial_merge_size,
             )
+            #为每个时空位置分配唯一索引
             index = torch.arange(grid_t * llm_grid_h * llm_grid_w).reshape(grid_t, llm_grid_h, llm_grid_w)
+            #padding
             pad_h = vit_merger_window_size - llm_grid_h % vit_merger_window_size
             pad_w = vit_merger_window_size - llm_grid_w % vit_merger_window_size
             num_windows_h = (llm_grid_h + pad_h) // vit_merger_window_size
             num_windows_w = (llm_grid_w + pad_w) // vit_merger_window_size
             index_padded = F.pad(index, (0, pad_w, 0, pad_h), "constant", -100)
+            #计算在高度和宽度方向上，分别有多少个完整的窗口
             index_padded = index_padded.reshape(
                 grid_t,
                 num_windows_h,
@@ -510,6 +575,10 @@ class Qwen2_5_VisionTransformerPretrainedModel(Qwen2_5_VLPreTrainedModel):
             window_index_id += (grid_t * llm_grid_h * llm_grid_w).item()
         window_index = torch.cat(window_index, dim=0)
 
+        #window_index: 一个长向量，顺序是：Window 0 的所有索引 -> Window 1 的所有索引 ... 
+        # 即 [0, 1, 2, 3, 8, 9, ..., 63]。注意，由于是按窗口重新排列的，它的顺序不再是 0, 1, 2, 3... 连续增长。
+        # cu_window_seqlens: [0, 16, 32, 48, 64]。
+        # 只在窗口内部做注意力操作
         return window_index, cu_window_seqlens
 
     def forward(self, hidden_states: torch.Tensor, grid_thw: torch.Tensor) -> torch.Tensor:
@@ -523,9 +592,11 @@ class Qwen2_5_VisionTransformerPretrainedModel(Qwen2_5_VLPreTrainedModel):
         Returns:
             `torch.Tensor`: hidden_states.
         """
-        hidden_states = self.patch_embed(hidden_states)
-        rotary_pos_emb = self.rot_pos_emb(grid_thw)
-        window_index, cu_window_seqlens = self.get_window_index(grid_thw)
+        #打平后的视觉特征，形状通常是 (总序列长度, 隐藏层维度)。
+        hidden_states = self.patch_embed(hidden_states)  # 通过patch嵌入层
+        rotary_pos_emb = self.rot_pos_emb(grid_thw)  # 生成旋转位置编码
+        window_index, cu_window_seqlens = self.get_window_index(grid_thw)  # 获取窗口索引
+
         cu_window_seqlens = torch.tensor(
             cu_window_seqlens,
             device=hidden_states.device,
@@ -534,15 +605,18 @@ class Qwen2_5_VisionTransformerPretrainedModel(Qwen2_5_VLPreTrainedModel):
         cu_window_seqlens = torch.unique_consecutive(cu_window_seqlens)
 
         seq_len, _ = hidden_states.size()
+        # 原始形状: (seq_len, hidden_size)
         hidden_states = hidden_states.reshape(seq_len // self.spatial_merge_unit, self.spatial_merge_unit, -1)
-        hidden_states = hidden_states[window_index, :, :]
-        hidden_states = hidden_states.reshape(seq_len, -1)
+        hidden_states = hidden_states[window_index, :, :]  # 按窗口索引重排
+        hidden_states = hidden_states.reshape(seq_len, -1)  # 恢复形状
+        
+        # 位置编码
         rotary_pos_emb = rotary_pos_emb.reshape(seq_len // self.spatial_merge_unit, self.spatial_merge_unit, -1)
         rotary_pos_emb = rotary_pos_emb[window_index, :, :]
         rotary_pos_emb = rotary_pos_emb.reshape(seq_len, -1)
         emb = torch.cat((rotary_pos_emb, rotary_pos_emb), dim=-1)
         position_embeddings = (emb.cos(), emb.sin())
-
+        # 计算累积序列长度（用于注意力掩码）
         cu_seqlens = torch.repeat_interleave(grid_thw[:, 1] * grid_thw[:, 2], grid_thw[:, 0]).cumsum(
             dim=0,
             # Select dtype based on the following factors:
@@ -553,10 +627,11 @@ class Qwen2_5_VisionTransformerPretrainedModel(Qwen2_5_VLPreTrainedModel):
         )
         cu_seqlens = F.pad(cu_seqlens, (1, 0), value=0)
 
+        # Transformer块处理
         for layer_num, blk in enumerate(self.blocks):
-            if layer_num in self.fullatt_block_indexes:
+            if layer_num in self.fullatt_block_indexes: #full注意力
                 cu_seqlens_now = cu_seqlens
-            else:
+            else:                                       #window注意力
                 cu_seqlens_now = cu_window_seqlens
             if self.gradient_checkpointing and self.training:
                 hidden_states = self._gradient_checkpointing_func(
@@ -565,16 +640,22 @@ class Qwen2_5_VisionTransformerPretrainedModel(Qwen2_5_VLPreTrainedModel):
             else:
                 hidden_states = blk(hidden_states, cu_seqlens=cu_seqlens_now, position_embeddings=position_embeddings)
 
-        hidden_states = self.merger(hidden_states)
-        reverse_indices = torch.argsort(window_index)
-        hidden_states = hidden_states[reverse_indices, :]
+        hidden_states = self.merger(hidden_states) # 通过合并层
+        reverse_indices = torch.argsort(window_index) # 计算逆索引
+        hidden_states = hidden_states[reverse_indices, :] # 恢复到原始顺序
 
         return hidden_states
 
 
+###得到3个维度上的rope
+# 虽然这段代码只写到了生成 cos 和 sin，但后续在 apply_rotary_emb 时，M-RoPE 有一个非常独特的处理方式：切分 Q/K: 模型会将 $q$（查询向量）按照 $d_t, d_h, d_w$ 的比例切成三段。分别旋转:$q_{\text{第一段}}$ 使用 cos[0] 和 sin[0]（时间信息）旋转。$q_{\text{第二段}}$ 使用 cos[1] 和 sin[1]（高度信息）旋转。$q_{\text{第三段}}$ 使用 cos[2] 和 sin[2]（宽度信息）旋转。合并: 旋转后的三段重新拼回原始维度。
+
+
+    
 class Qwen2_5_VLRotaryEmbedding(nn.Module):
     def __init__(self, config: Qwen2_5_VLConfig, device=None):
         super().__init__()
+        #果配置了 rope_scaling，则提取缩放类型，否则默认为标准 RoPE。
         # BC: "rope_type" was originally "type"
         if hasattr(config, "rope_scaling") and config.rope_scaling is not None:
             self.rope_type = config.rope_scaling.get("rope_type", config.rope_scaling.get("type"))
@@ -584,12 +665,15 @@ class Qwen2_5_VLRotaryEmbedding(nn.Module):
         self.original_max_seq_len = config.max_position_embeddings
 
         self.config = config
+        ## 根据 rope_type 从预定义的函数库中选择对应的初始化函数
         self.rope_init_fn = ROPE_INIT_FUNCTIONS[self.rope_type]
-
+        # 初始化 逆频率 (inv_freq) 和 注意力缩放因子 (attention_scaling)
         inv_freq, self.attention_scaling = self.rope_init_fn(self.config, device)
         self.register_buffer("inv_freq", inv_freq, persistent=False)
         self.original_inv_freq = self.inv_freq
 
+    # 当输入长度超过模型预训练的长度时，通过动态调整频率（如 NTK-Aware Scaling）来保持模型在外推长度下的表现。
+    # 长度减小时，恢复原始的高精度频率，重置 inv_freq
     def _dynamic_frequency_update(self, position_ids, device):
         """
         dynamic RoPE layers should recompute `inv_freq` in the following situations:
@@ -615,12 +699,22 @@ class Qwen2_5_VLRotaryEmbedding(nn.Module):
 
         # Core RoPE block. In contrast to other models, Qwen2_5_VL has different position ids for thw grids
         # So we expand the inv_freq to shape (3, ...)
+        
+        # # 关键点：Qwen2.5-VL 处理的是 T, H, W 三个维度的位置
+        # position_ids 的形状通常是 (3, batch_size, seq_len)
+        # 将 inv_freq 扩展形状：从 (dim/2) 变为 (3, 1, dim/2, 1) 
         inv_freq_expanded = self.inv_freq[None, None, :, None].float().expand(3, position_ids.shape[1], -1, 1)
+        # 将 position_ids 扩展：变为 (3, batch_size, 1, seq_len)
         position_ids_expanded = position_ids[:, :, None, :].float()  # shape (3, bs, 1, positions)
-        # Force float32 (see https://github.com/huggingface/transformers/pull/29285)
+        # Force float32 (see https://github.com/huggingface/transformers/pull/29285)，强制使用 float32 计算以保证精度
         device_type = x.device.type
+        
         device_type = device_type if isinstance(device_type, str) and device_type != "mps" else "cpu"
+        
+        # 矩阵乘法计算频率：(inv_freq * position_ids)
+        # 得到每个位置对应的旋转角度
         with torch.autocast(device_type=device_type, enabled=False):
+            # transpose(2, 3) 后形状：(3, batch_size, seq_len, dim/2)
             freqs = (inv_freq_expanded.float() @ position_ids_expanded.float()).transpose(2, 3)
             emb = torch.cat((freqs, freqs), dim=-1)
             cos = emb.cos()
@@ -632,7 +726,7 @@ class Qwen2_5_VLRotaryEmbedding(nn.Module):
 
         return cos.to(dtype=x.dtype), sin.to(dtype=x.dtype)
 
-
+# MLP
 class Qwen2MLP(nn.Module):
     def __init__(self, config):
         super().__init__()
@@ -649,6 +743,7 @@ class Qwen2MLP(nn.Module):
         return down_proj
 
 
+# 完整计算mrope 
 def apply_multimodal_rotary_pos_emb(q, k, cos, sin, mrope_section, unsqueeze_dim=1):
     """Applies Rotary Position Embedding with Multimodal Sections to the query and key tensors (https://qwenlm.github.io/blog/qwen2-vl/).
 
@@ -681,19 +776,25 @@ def apply_multimodal_rotary_pos_emb(q, k, cos, sin, mrope_section, unsqueeze_dim
     Returns:
         `tuple(torch.Tensor)` comprising of the query and key tensors rotated using the Rotary Position Embedding.
     """
+    
+    # mrope_section = [16, 16, 32] * 2 结果：mrope_section = [16, 16, 32, 16, 16, 32] 注意：这代表将 128 维分成了 6 块，每块的大小分别是 16, 16, 32, 16, 16, 32。
     mrope_section = mrope_section * 2
+    #为什么要分 6 块？
+    #因为 RoPE 的原理是两两配对（例如第 1 维和第 65 维配对旋转）。所以 Qwen 的做法是把 $d$ 维分成前半部分（$d/2$）和后半部分（$d/2$），这两部分必须应用完全相同的旋转逻辑。
+    #split 会沿着最后一个维度，按照 [16, 16, 32, 16, 16, 32] 的宽度把这 128 维切开。
     cos = torch.cat([m[i % 3] for i, m in enumerate(cos.split(mrope_section, dim=-1))], dim=-1).unsqueeze(
         unsqueeze_dim
     )
     sin = torch.cat([m[i % 3] for i, m in enumerate(sin.split(mrope_section, dim=-1))], dim=-1).unsqueeze(
         unsqueeze_dim
     )
-
+    #结果 Shape: (1, 196, 128) (即 (bs, seq, d))
     q_embed = (q * cos) + (rotate_half(q) * sin)
     k_embed = (k * cos) + (rotate_half(k) * sin)
     return q_embed, k_embed
 
 
+# 对于MQA和GQA，kv head复制
 def repeat_kv(hidden_states: torch.Tensor, n_rep: int) -> torch.Tensor:
     """
     This is the equivalent of torch.repeat_interleave(x, dim=1, repeats=n_rep). The hidden states go from (batch,
@@ -706,6 +807,7 @@ def repeat_kv(hidden_states: torch.Tensor, n_rep: int) -> torch.Tensor:
     return hidden_states.reshape(batch, num_key_value_heads * n_rep, slen, head_dim)
 
 
+#典型的 GQA (Grouped-Query Attention) 结构，并针对多模态（视觉+文本）任务进行了优化
 class Qwen2_5_VLAttention(nn.Module):
     """
     Multi-headed attention from 'Attention Is All You Need' paper. Modified to use sliding window attention: Longformer
@@ -765,11 +867,13 @@ class Qwen2_5_VLAttention(nn.Module):
         key_states = key_states.view(bsz, q_len, -1, self.head_dim).transpose(1, 2)
         value_states = value_states.view(bsz, q_len, -1, self.head_dim).transpose(1, 2)
 
+        # mrope
         cos, sin = position_embeddings
         query_states, key_states = apply_multimodal_rotary_pos_emb(
             query_states, key_states, cos, sin, self.rope_scaling["mrope_section"]
         )
 
+        # kvcache
         if past_key_value is not None:
             cache_kwargs = {"sin": sin, "cos": cos, "cache_position": cache_position}  # Specific to RoPE models
             key_states, value_states = past_key_value.update(key_states, value_states, self.layer_idx, cache_kwargs)
@@ -780,16 +884,18 @@ class Qwen2_5_VLAttention(nn.Module):
 
         attn_weights = torch.matmul(query_states, key_states.transpose(2, 3)) / math.sqrt(self.head_dim)
 
+        # 注意力掩码
         if attention_mask is not None:  # no matter the length, we just slice it
             causal_mask = attention_mask[:, :, :, : key_states.shape[-2]]
             attn_weights = attn_weights + causal_mask
 
         # Fix precision issues in Qwen2-VL float16 inference
         # Replace inf values with zeros in attention weights to prevent NaN propagation
+        # 在 FP16 推理时，Infinity 值可能导致 NaN，这里将无穷大替换为 0 以增强稳定性
         if query_states.dtype == torch.float16:
             attn_weights = torch.where(torch.isinf(attn_weights), torch.zeros_like(attn_weights), attn_weights)
 
-        # upcast attention to fp32
+        # upcast attention to fp32，softmax要在fp32下进行
         attn_weights = nn.functional.softmax(attn_weights, dim=-1, dtype=torch.float32).to(query_states.dtype)
         attn_weights = nn.functional.dropout(attn_weights, p=self.attention_dropout, training=self.training)
         attn_output = torch.matmul(attn_weights, value_states)
@@ -811,6 +917,7 @@ class Qwen2_5_VLAttention(nn.Module):
         return attn_output, attn_weights, past_key_value
 
 
+# flashattn版本注意力计算
 class Qwen2_5_VLFlashAttention2(Qwen2_5_VLAttention):
     """
     Qwen2_5_VL flash attention module, following Qwen2_5_VL attention module. This module inherits from `Qwen2_5_VLAttention`
@@ -867,6 +974,8 @@ class Qwen2_5_VLFlashAttention2(Qwen2_5_VLAttention):
         # In PEFT, usually we cast the layer norms in float32 for training stability reasons
         # therefore the input hidden states gets silently casted in float32. Hence, we need
         # cast them back in float16 just to be sure everything works as expected.
+        #在 PEFT（如 LoRA）训练时，LayerNorm 常被上采样到 float32，导致输入到这里的张量也变成了 fp32。
+        #原因：Flash Attention 算子不支持 float32（它设计初衷就是为了加速半精度计算）。
         input_dtype = query_states.dtype
         if input_dtype == torch.float32:
             if torch.is_autocast_enabled():
@@ -888,10 +997,12 @@ class Qwen2_5_VLFlashAttention2(Qwen2_5_VLAttention):
             value_states = value_states.to(target_dtype)
 
         # Reashape to the expected shape for Flash Attention
+        # Flash Attention 库通常期望的输入形状是 (bsz, seq_len, num_heads, head_dim)
         query_states = query_states.transpose(1, 2)
         key_states = key_states.transpose(1, 2)
         value_states = value_states.transpose(1, 2)
-
+        
+        # 滑动窗口
         if (
             self.config.use_sliding_window
             and getattr(self.config, "sliding_window", None) is not None
@@ -943,6 +1054,7 @@ class Qwen2_5_VLSdpaAttention(Qwen2_5_VLAttention):
     ) -> Tuple[torch.Tensor, Optional[torch.Tensor], Optional[Tuple[torch.Tensor]]]:
         if output_attentions:
             # TODO: Improve this warning with e.g. `model.config.attn_implementation = "manual"` once this is implemented.
+            #逻辑：SDPA 算子为了加速，在 CUDA 底层直接完成了所有计算，不返回中间的注意力权重矩阵（Attention Weights）。策略：如果你在调用模型时设置了 output_attentions=True（例如为了做可视化），SDPA 无法满足需求，代码会自动“回退”到父类 Qwen2_5_VLAttention 的手动实现（Eager 模式）。
             logger.warning_once(
                 "Qwen2_5_VLModel is using Qwen2_5_VLSdpaAttention, but `torch.nn.functional.scaled_dot_product_attention` does not support `output_attentions=True`. Falling back to the manual attention implementation, "
                 'but specifying the manual implementation will be required from Transformers version v5.0.0 onwards. This warning can be removed using the argument `attn_implementation="eager"` when loading the model.'
@@ -980,6 +1092,7 @@ class Qwen2_5_VLSdpaAttention(Qwen2_5_VLAttention):
         key_states = repeat_kv(key_states, self.num_key_value_groups)
         value_states = repeat_kv(value_states, self.num_key_value_groups)
 
+        #优化点：SDPA 有一个 is_causal 参数。如果设为 True，算子内部会直接应用因果掩码（下三角矩阵），而不需要你手动传入一个巨大的 mask 张量，这样更快。判断逻辑：只有当外部没有传入 causal_mask 且序列长度大于 1 时，才启用这个内部优化
         causal_mask = attention_mask
         if attention_mask is not None:  # no matter the length, we just slice it
             causal_mask = attention_mask[:, :, :, : key_states.shape[-2]]
@@ -996,6 +1109,7 @@ class Qwen2_5_VLSdpaAttention(Qwen2_5_VLAttention):
         # The q_len > 1 is necessary to match with AttentionMaskConverter.to_causal_4d that does not create a causal mask in case q_len == 1.
         is_causal = True if causal_mask is None and q_len > 1 else False
 
+        # sdpd算法
         attn_output = torch.nn.functional.scaled_dot_product_attention(
             query_states,
             key_states,
@@ -1012,7 +1126,7 @@ class Qwen2_5_VLSdpaAttention(Qwen2_5_VLAttention):
 
         return attn_output, None, past_key_value
 
-
+# attention选择
 QWEN2_5_VL_ATTENTION_CLASSES = {
     "eager": Qwen2_5_VLAttention,
     "flash_attention_2": Qwen2_5_VLFlashAttention2,
@@ -1020,11 +1134,13 @@ QWEN2_5_VL_ATTENTION_CLASSES = {
 }
 
 
+
+# Pre-Norm（前置归一化） Transformer 架构
 class Qwen2_5_VLDecoderLayer(nn.Module):
     def __init__(self, config: Qwen2_5_VLConfig, layer_idx: int):
         super().__init__()
         self.hidden_size = config.hidden_size
-
+        # 初始化代码中提到了滑动窗口注意力。如果开启了 SWA 但没有使用 Flash Attention 2，模型会发出警告，因为 SWA 在标准实现下效率较低。
         if config.use_sliding_window and config._attn_implementation != "flash_attention_2":
             logger.warning_once(
                 f"Sliding Window Attention is enabled but not implemented for `{config._attn_implementation}`; "
@@ -1069,9 +1185,9 @@ class Qwen2_5_VLDecoderLayer(nn.Module):
                 Arbitrary kwargs to be ignored, used for FSDP and other methods that injects code
                 into the model
         """
-
+        # 残差
         residual = hidden_states
-
+        # pre-norm
         hidden_states = self.input_layernorm(hidden_states)
 
         # Self Attention
@@ -1085,9 +1201,11 @@ class Qwen2_5_VLDecoderLayer(nn.Module):
             cache_position=cache_position,
             position_embeddings=position_embeddings,
         )
+        # 残差相加
         hidden_states = residual + hidden_states
 
-        # Fully Connected
+        # Fully Connected 全连接层
+        #hidden_states: 处理后的特征。
         residual = hidden_states
         hidden_states = self.post_attention_layernorm(hidden_states)
         hidden_states = self.mlp(hidden_states)
@@ -1095,6 +1213,8 @@ class Qwen2_5_VLDecoderLayer(nn.Module):
 
         outputs = (hidden_states,)
 
+        #self_attn_weights: 如果 output_attentions=True，则返回注意力权重（用于可视化或分析）。
+        #present_key_value: 如果 use_cache=True，则返回 KV Cache（键值缓存），这在 推理（Inference） 阶段非常重要，可以避免重复计算之前的 token。
         if output_attentions:
             outputs += (self_attn_weights,)
 
@@ -1113,8 +1233,10 @@ class Qwen2_5_VLModel(Qwen2_5_VLPreTrainedModel):
         super().__init__(config)
         self.padding_idx = config.pad_token_id
         self.vocab_size = config.vocab_size
-
+        
+        # embedding层
         self.embed_tokens = nn.Embedding(config.vocab_size, config.hidden_size, self.padding_idx)
+        # decoder layer
         self.layers = nn.ModuleList(
             [Qwen2_5_VLDecoderLayer(config, layer_idx) for layer_idx in range(config.num_hidden_layers)]
         )
@@ -1131,7 +1253,8 @@ class Qwen2_5_VLModel(Qwen2_5_VLPreTrainedModel):
 
     def set_input_embeddings(self, value):
         self.embed_tokens = value
-
+    
+    # 前向传播
     def forward(
         self,
         input_ids: torch.LongTensor = None,
@@ -1145,6 +1268,7 @@ class Qwen2_5_VLModel(Qwen2_5_VLPreTrainedModel):
         return_dict: Optional[bool] = None,
         cache_position: Optional[torch.LongTensor] = None,
     ) -> Union[Tuple, BaseModelOutputWithPast]:
+        # 是否输出attention、hiddenstate、是否使用cacha，是否以字典形式返回
         output_attentions = output_attentions if output_attentions is not None else self.config.output_attentions
         output_hidden_states = (
             output_hidden_states if output_hidden_states is not None else self.config.output_hidden_states
@@ -1153,9 +1277,11 @@ class Qwen2_5_VLModel(Qwen2_5_VLPreTrainedModel):
 
         return_dict = return_dict if return_dict is not None else self.config.use_return_dict
 
+        # 输入是input id或者embeddings
         if (input_ids is None) ^ (inputs_embeds is not None):
             raise ValueError("You must specify exactly one of input_ids or inputs_embeds")
 
+        # 训练时强制关闭KV缓存
         if self.gradient_checkpointing and self.training:
             if use_cache:
                 logger.warning_once(
@@ -1167,27 +1293,32 @@ class Qwen2_5_VLModel(Qwen2_5_VLPreTrainedModel):
         if use_cache and past_key_values is None and not torch.jit.is_tracing():
             past_key_values = DynamicCache()
 
+        # 通过id得到embedding
         if inputs_embeds is None:
             inputs_embeds = self.embed_tokens(input_ids)
 
         if cache_position is None:
             past_seen_tokens = past_key_values.get_seq_length() if past_key_values is not None else 0
+            # cache_position 生成了一个从“已处理长度”到“当前总长度”的索引序列。
             cache_position = torch.arange(
                 past_seen_tokens, past_seen_tokens + inputs_embeds.shape[1], device=inputs_embeds.device
             )
 
         # the hard coded `3` is for temporal, height and width.
         if position_ids is None:
+            #[3, batch_size, seq_len]
             position_ids = cache_position.view(1, 1, -1).expand(3, inputs_embeds.shape[0], -1)
         elif position_ids.dim() == 2:
             position_ids = position_ids[None, ...].expand(3, position_ids.shape[0], -1)
-
+        
+        # 因果掩码
         causal_mask = self._update_causal_mask(
             attention_mask, inputs_embeds, cache_position, past_key_values, output_attentions
         )
 
         hidden_states = inputs_embeds
 
+        # mrope
         # create position embeddings to be shared across the decoder layers
         position_embeddings = self.rotary_emb(hidden_states, position_ids)
 
@@ -1196,8 +1327,10 @@ class Qwen2_5_VLModel(Qwen2_5_VLPreTrainedModel):
         all_self_attns = () if output_attentions else None
         next_decoder_cache = None
 
+        # 模型遍历每一层，将上一层的输出作为下一层的输入。如果开启了 gradient_checkpointing，则会牺牲计算时间来换取显存节省。
         for decoder_layer in self.layers:
             if output_hidden_states:
+                # 返回隐藏状态
                 all_hidden_states += (hidden_states,)
 
             if self.gradient_checkpointing and self.training:
@@ -1230,6 +1363,7 @@ class Qwen2_5_VLModel(Qwen2_5_VLPreTrainedModel):
                 next_decoder_cache = layer_outputs[2 if output_attentions else 1]
 
             if output_attentions:
+                # 返回隐藏注意力
                 all_self_attns += (layer_outputs[1],)
 
         hidden_states = self.norm(hidden_states)
@@ -1257,8 +1391,10 @@ class Qwen2_5_VLModel(Qwen2_5_VLPreTrainedModel):
         past_key_values: Cache,
         output_attentions: bool,
     ):
+        #左填充要求：Flash Attention 2 在进行批处理（Batching）生成时，通常要求使用左填充（Left Padding）。如果检测到右填充，代码会直接报错。这是因为 Flash Attention 的底层算子对因果掩码的处理方式决定了它无法很好地兼容右填充的生成。返回值：如果一切正常且存在 attention_mask，它会直接返回这个掩码或 None（由底层 kernel 处理因果性）。
         if self.config._attn_implementation == "flash_attention_2":
             if attention_mask is not None and past_key_values is not None:
+                # 不是所有序列都在最后一列有有效token → 意味着右侧有填充
                 is_padding_right = attention_mask[:, -1].sum().item() != input_tensor.size()[0]
                 if is_padding_right:
                     raise ValueError(
@@ -1273,10 +1409,12 @@ class Qwen2_5_VLModel(Qwen2_5_VLPreTrainedModel):
         # For SDPA, when possible, we will rely on its `is_causal` argument instead of its `attn_mask` argument, in
         # order to dispatch on Flash Attention 2. This feature is not compatible with static cache, as SDPA will fail
         # to infer the attention mask.
+        # 非特殊缓存：静态缓存和滑动窗口缓存与SDPA的优化不兼容
         past_seen_tokens = past_key_values.get_seq_length() if past_key_values is not None else 0
         using_static_cache = isinstance(past_key_values, StaticCache)
         using_sliding_window_cache = isinstance(past_key_values, SlidingWindowCache)
 
+        #_ignore_causal_mask_sdpa()判断逻辑：检查是否可以完全忽略传入的attention_mask，直接使用is_causal=True替代
         # When output attentions is True, sdpa implementation's forward method calls the eager implementation's forward
         if (
             self.config._attn_implementation == "sdpa"
@@ -1292,6 +1430,7 @@ class Qwen2_5_VLModel(Qwen2_5_VLPreTrainedModel):
             ):
                 return None
 
+        #长度决定逻辑：静态/滑动窗口缓存：使用预设的最大长度；动态缓存或无缓存：优先用掩码长度，否则动态计算
         dtype, device = input_tensor.dtype, input_tensor.device
         min_dtype = torch.finfo(dtype).min
         sequence_length = input_tensor.shape[1]
@@ -1332,6 +1471,7 @@ class Qwen2_5_VLModel(Qwen2_5_VLPreTrainedModel):
 
         return causal_mask
 
+    #目标：输出一个形状为 (batch_size, 1, query_length, key_value_length)
     @staticmethod
     def _prepare_4d_causal_attention_mask_with_cache_position(
         attention_mask: torch.Tensor,
@@ -1368,16 +1508,20 @@ class Qwen2_5_VLModel(Qwen2_5_VLPreTrainedModel):
             past_key_values (`Cache`):
                 The cache class that is being used currently to generate
         """
+        #如果上游已经传回了格式正确的 4D 掩码，则不需要重复计算
         if attention_mask is not None and attention_mask.dim() == 4:
             # In this case we assume that the mask comes already in inverted form and requires no inversion or slicing.
             causal_mask = attention_mask
         else:
+            # 先初始化一个全为“极小值”的矩阵，形状是 (当前序列长度, 目标总长度)。这意味着默认情况下，所有位置都是被遮蔽的。
             min_dtype = torch.finfo(dtype).min
             causal_mask = torch.full(
                 (sequence_length, target_length), fill_value=min_dtype, dtype=dtype, device=device
             )
+            #这里利用广播机制生成一个三角阵。cache_position 表示当前 token 在序列中的实际位置。如果 target_length（列索引）大于 cache_position（行索引），结果为 True。这些 True 的位置表示“未来”的 token，需要被遮蔽。
             diagonal_attend_mask = torch.arange(target_length, device=device) > cache_position.reshape(-1, 1)
             if config.sliding_window is not None:
+                #如果启用了滑动窗口（Sliding Window），模型不仅不能看未来，也不能看太久远之前的过去。sliding_attend_mask：计算哪些 token 已经超出了窗口长度（即距离当前位置超过了 config.sliding_window）。bitwise_or_：将“未来的”和“太远的过去”合并在一起，统一进行遮蔽。
                 # if we have sliding window, we should not attend to tokens beyond sliding window length, so we mask them out also
                 # the check is needed to verify is current checkpoint was trained with sliding window or not
                 if not isinstance(past_key_values, SlidingWindowCache) or sequence_length > target_length:
@@ -1385,8 +1529,9 @@ class Qwen2_5_VLModel(Qwen2_5_VLPreTrainedModel):
                         cache_position.reshape(-1, 1) - config.sliding_window
                     )
                     diagonal_attend_mask.bitwise_or_(sliding_attend_mask)
-            causal_mask *= diagonal_attend_mask
-            causal_mask = causal_mask[None, None, :, :].expand(batch_size, 1, -1, -1)
+            causal_mask *= diagonal_attend_mask # 将需要遮蔽的地方保留极小值，不需要遮蔽的地方变为 0
+            causal_mask = causal_mask[None, None, :, :].expand(batch_size, 1, -1, -1)  #使用 expand 将其形状从 2D 扩展到 4D，以匹配 PyTorch 常见的 Multi-Head Attention 输入格式
+            # 同时处理因果掩码和填充掩码
             if attention_mask is not None:
                 causal_mask = causal_mask.clone()  # copy to contiguous memory for in-place edit
                 if attention_mask.shape[-1] > target_length:
@@ -1403,6 +1548,18 @@ class Qwen2_5_VLModel(Qwen2_5_VLPreTrainedModel):
 
 
 @dataclass
+# 核心字段解析：
+# loss: 标量值。仅在训练时提供 labels 时返回，代表预测下一个 token 的损失。
+# logits: 最重要的输出。形状为 (batch_size, sequence_length, vocab_size)。它包含了词表里每个词的得分，通过 softmax 后就能得到预测概率。
+# past_key_values: 用于 KV Cache 加速。它保存了之前步骤计算好的 Key 和 Value 向量，避免重复计算，大幅提升生成速度。
+# hidden_states: 每一层 Transformer 输出的原始隐藏层向量。
+# attentions: 每一层的注意力权重矩阵，用于分析模型在关注哪些 token。
+# rope_deltas: Qwen2.5-VL 特有字段。用于处理多模态旋转位置编码（RoPE）的偏移量。
+# anchor_outputs: 可能用于特定的视觉锚点或目标检测任务的辅助输出。
+
+# 身份：这是一个数据类（Data Class），用于封装模型的输出结果。
+# 功能：
+# 它规范了模型的返回值，替代了简单的 Tuple 返回。
 class Qwen2_5_VLCausalLMOutputWithPast(ModelOutput):
     """
     Base class for Qwen2_5_VL causal language model (or autoregressive) outputs.
@@ -1516,6 +1673,49 @@ QWEN2_5_VL_INPUTS_DOCSTRING = r"""
         rope_deltas (`torch.LongTensor` of shape `(batch_size, )`, *optional*):
             The rope index difference between sequence length and multimodal rope.
 """
+
+# Qwen2_5_VLDecoderLayer
+# 身份：这是 Transformer 架构中的单个解码器层（Block）。
+# 功能：
+# 这是模型最核心的重复单元。整个 LLM 由几十个这样的 Layer 堆叠而成。
+# 内部结构：
+# Self-Attention：计算 Token 之间的关联（代码中根据配置调用 sdpa, flash_attention_2 或 eager）。
+# MLP (Feed Forward)：前馈神经网络（GateProj -> UpProj -> Act -> DownProj）。
+# RMSNorm：输入前后的归一化（Pre-normalization）。
+# Residual Connection：残差连接（输入 + 输出）。
+
+
+#Qwen2_5_VLModel
+# 身份：这是 Qwen2.5-VL 的大语言模型（LLM）基座类。
+# 功能：
+# 它是纯粹的 Transformer 解码器（Decoder）结构。
+# 输入：接收经过 Tokenizer 处理的 input_ids（文本）和嵌入后的向量。
+# 处理：它负责将输入通过 Embedding 层转换为向量，加上旋转位置编码（RoPE），然后通过层层堆叠的 Qwen2_5_VLDecoderLayer 进行处理，最后经过 RMSNorm 归一化。
+# 输出：输出最后一层的隐藏状态（Hidden States）。
+# 注意：它不包含最后的语言预测头（LM Head，即输出词表概率的那一层），也不直接包含视觉编码器（Vision Encoder 通常作为独立模块或在更高层的封装类中调用，这里的 VLModel 更侧重于语言处理的主干部分）。
+
+
+# Qwen2_5_VLPreTrainedModel
+# 身份：这是所有 Qwen2.5-VL 相关模型的抽象基类（父类）。
+# 功能：
+# 继承体系：它继承自 Hugging Face 的 PreTrainedModel，充当与 Hugging Face 生态系统（如 save_pretrained, from_pretrained）的桥梁。
+# 权重管理：负责权重的初始化（如 _init_weights 方法，定义了如何用正态分布初始化 Linear 层）。
+# 配置管理：管理模型的配置类（Qwen2_5_VLConfig）。
+# 通用属性：定义了是否支持梯度检查点（Gradient Checkpointing）、是否支持 Flash Attention 等通用属性。
+
+
+# Qwen2_5_VisionTransformerPretrainedModel
+# 身份：这是 Qwen2.5-VL 的**视觉编码器（Vision Encoder）**基类。
+# 功能：
+# 这是专门处理图像和视频输入的模块。
+# Patch Embedding：通过 3D 卷积（Qwen2_5_VisionPatchEmbed）将图像或视频帧切片并转换为向量。
+# 3D RoPE：实现了特有的时空旋转位置编码（处理时间 t、高度 h、宽度 w）。
+# Window Attention：实现了基于窗口的注意力机制（通过 get_window_index），以处理高分辨率图像而不至于显存爆炸。
+# Patch Merging：包含 Qwen2_5_VLPatchMerger，用于在进入 LLM 之前压缩视觉特征（例如 2x2 像素合并），减少 Token 数量。
+
+
+# Qwen2_5_VisionTransformerPretrainedModel、Qwen2_5_VLModel均继承于Qwen2_5_VLPreTrainedModel
+# Qwen2_5_VLPreTrainedModel继承于PreTrainedModel
 
 
 __all__ = ["Qwen2_5_VLModel", "Qwen2_5_VLPreTrainedModel", "Qwen2_5_VLCausalLMOutputWithPast",

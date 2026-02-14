@@ -1085,12 +1085,14 @@ def replace_qwen_2_with_mixed_modality_forward(use_liger=True):
 
 def replace_qwen2_5_with_mixed_modality_forward(use_liger=True):
     if use_liger:
+        # 替换rope、mlp、rmsnorm、forward
         transformers.models.qwen2_5_vl.modeling_qwen2_5_vl.Qwen2_5_VLForConditionalGeneration.forward = qwen2_5_mixed_modality_forward_with_flce
         transformers.models.qwen2_5_vl.modeling_qwen2_5_vl.apply_rotary_pos_emb_flashatt = (apply_rotary_pos_emb_flashatt_fp32)
         transformers.models.qwen2_5_vl.modeling_qwen2_5_vl.Qwen2MLP = LigerSwiGLUMLP
         transformers.models.qwen2_5_vl.modeling_qwen2_5_vl.Qwen2RMSNorm = LigerRMSNorm
         transformers.models.qwen2_5_vl.modeling_qwen2_5_vl.apply_multimodal_rotary_pos_emb = (liger_multimodal_rotary_pos_emb)
     else:
+        # 替换forward、rope
         transformers.models.qwen2_5_vl.modeling_qwen2_5_vl.Qwen2_5_VLForConditionalGeneration.forward = qwen2_5_mixed_modality_forward
         #transformers.models.qwen2_5_vl.modeling_qwen2_5_vl.apply_rotary_pos_emb_flashatt = (apply_rotary_pos_emb_flashatt_fp32)
 
@@ -1237,10 +1239,12 @@ def qwen_2_mixed_modality_forward_with_flce(
             shift_labels = shift_labels.to(shift_logits.device)
             loss = loss_fct(shift_logits, shift_labels)
 
+    # 传统模式：元组返回 (if not return_dict)
     if not return_dict:
         output = (logits,) + outputs[1:]
         return (loss,) + output if loss is not None else output
 
+    # 结构化对象返回
     return Qwen2VLCausalLMOutputWithPast(
         loss=loss,
         logits=logits,
@@ -1393,6 +1397,7 @@ def qwen_2_mixed_modality_forward(
         rope_deltas=self.rope_deltas,
     )
 
+# 带flce优化的qwen2.5 forward函数（liger-kernel）
 def qwen2_5_mixed_modality_forward_with_flce(
     self,
     input_ids: torch.LongTensor = None,
@@ -1414,6 +1419,27 @@ def qwen2_5_mixed_modality_forward_with_flce(
     second_per_grid_ts: Optional[torch.Tensor] = None,
 ) -> Union[Tuple, Qwen2_5_VLCausalLMOutputWithPast]:
 
+#     self,  # 模型实例自身
+#     input_ids: torch.LongTensor = None,  # 文本输入ID
+#     attention_mask: Optional[torch.Tensor] = None,  # 注意力掩码
+#     position_ids: Optional[torch.LongTensor] = None,  # 位置编码ID
+#     past_key_values: Optional[List[torch.FloatTensor]] = None,  # 缓存的键值对（用于增量生成）
+#     inputs_embeds: Optional[torch.FloatTensor] = None,  # 直接输入的嵌入向量
+#     labels: Optional[torch.LongTensor] = None,  # 训练标签（用于计算损失）
+#     use_cache: Optional[bool] = None,  # 是否使用键值缓存
+#     output_attentions: Optional[bool] = None,  # 是否输出注意力权重
+#     output_hidden_states: Optional[bool] = None,  # 是否输出隐藏状态
+#     return_dict: Optional[bool] = None,  # 是否以字典形式返回
+#     pixel_values: Optional[torch.Tensor] = None,  # 图像像素值
+#     pixel_values_videos: Optional[torch.FloatTensor] = None,  # 视频像素值
+#     image_grid_thw: Optional[torch.LongTensor] = None,  # 图像网格尺寸（时间、高度、宽度）
+#     video_grid_thw: Optional[torch.LongTensor] = None,  # 视频网格尺寸
+#     rope_deltas: Optional[torch.LongTensor] = None,  # RoPE位置编码的偏移量
+#     cache_position: Optional[torch.LongTensor] = None,  # 缓存位置信息
+#     second_per_grid_ts: Optional[torch.Tensor] = None,  # 每个网格的时间（秒）
+#     Union[Tuple, Qwen2_5_VLCausalLMOutputWithPast]:  # 返回类型
+    
+    # 设置输出配置，优先使用传入参数，否则使用模型配置
     output_attentions = output_attentions if output_attentions is not None else self.config.output_attentions
     output_hidden_states = (
         output_hidden_states if output_hidden_states is not None else self.config.output_hidden_states
@@ -1421,39 +1447,50 @@ def qwen2_5_mixed_modality_forward_with_flce(
     return_dict = return_dict if return_dict is not None else self.config.use_return_dict
 
     if inputs_embeds is None:
+        # 如果没有提供预计算的嵌入，就从input_ids计算
         inputs_embeds = self.model.embed_tokens(input_ids)
     
         # Pass dummy image and dummy grid to the visual model to avoid deepspeed error.
+        # 如果没有图像和视频输入，创建虚拟数据避免DeepSpeed错误
         if pixel_values is None and pixel_values_videos is None:
             # Create dummy pixel_values and grid_thw for avoiding deepspeed error.
+            # 创建虚拟像素值和网格尺寸
             dummy_pixel = torch.zeros(14308, 1176).to(self.visual.device)
             dummy_grid = torch.tensor([[1, 98, 146]]).to(self.visual.device)
-            
+            # 确保数据类型与视觉模型一致
             dummy_pixel = dummy_pixel.type(self.visual.dtype)
+            # 通过视觉模型处理虚拟数据
             image_embeds = self.visual(dummy_pixel, grid_thw=dummy_grid)
             # Operates as maksed_scatter for the image tokens
             # However the values are all zeros so it dosen't affect the embeddings.
             # This could avoid deepspeed error when some batch only has texts.
+            # 添加零值避免影响嵌入，但保持计算图完整
             inputs_embeds += image_embeds.mean() * 0
             
         if pixel_values is not None:
+            # 转换数据类型以匹配视觉模型
             pixel_values = pixel_values.type(self.visual.dtype)
+            # 通过视觉模型提取图像特征
             image_embeds = self.visual(pixel_values, grid_thw=image_grid_thw)
+            # 检查文本中有多少个图像token，确保与提取的特征数量一致；验证图像token数量与特征数量匹配，防止特征和token位置不匹配
             n_image_tokens = (input_ids == self.config.image_token_id).sum().item()
             n_image_features = image_embeds.shape[0]
             if n_image_tokens != n_image_features:
                 raise ValueError(
                     f"Image features and image tokens do not match: tokens: {n_image_tokens}, features {n_image_features}"
                 )
-
+            # 创建掩码标识图像token的位置
             mask = input_ids == self.config.image_token_id
             mask_unsqueezed = mask.unsqueeze(-1)
             mask_expanded = mask_unsqueezed.expand_as(inputs_embeds)
             image_mask = mask_expanded.to(inputs_embeds.device)
-
+            
+            # 用图像特征替换对应位置的文本嵌入
             image_embeds = image_embeds.to(inputs_embeds.device, inputs_embeds.dtype)
+            ###########  masked_scatter操作：将image_embeds中的特征复制到inputs_embeds中image_mask为True的位置
             inputs_embeds = inputs_embeds.masked_scatter(image_mask, image_embeds)
 
+        # 视频处理类似于上面的图像
         if pixel_values_videos is not None:
             pixel_values_videos = pixel_values_videos.type(self.visual.dtype)
             video_embeds = self.visual(pixel_values_videos, grid_thw=video_grid_thw)
@@ -1476,9 +1513,17 @@ def qwen2_5_mixed_modality_forward_with_flce(
             attention_mask = attention_mask.to(inputs_embeds.device)
 
     # if we get 4D attention mask we cannot calculate rope deltas anymore. TODO @raushan fixme
+    # 当 position_ids 没有显式提供，并且：
+    # attention_mask 为 None，或者
+    # attention_mask 是二维的（batch_size × sequence_length）
+    # 这通常发生在第一次生成（prefill）阶段，需要计算初始的位置编码。
     if position_ids is None and (attention_mask is None or attention_mask.ndim == 2):
         # calculate RoPE index once per generation in the pre-fill stage only
         if (cache_position is not None and cache_position[0] == 0) or self.rope_deltas is None:
+            # 在预填充阶段（首次生成时）计算RoPE索引
+            # 三维rope
+            # position_ids：是给当前看得到的 Token 分配的具体坐标。
+            # rope_deltas：是给模型记下的“账本”，记录了目前为止所有输入一共占用了多少时空步长。
             position_ids, rope_deltas = self.get_rope_index(
                 input_ids,
                 image_grid_thw,
@@ -1486,9 +1531,13 @@ def qwen2_5_mixed_modality_forward_with_flce(
                 second_per_grid_ts,
                 attention_mask,
             )
+            # 保存这个值，是为了下一个 token 生成时，不用重新扫描前面的大图片，直接用这个差值推算新位置
             self.rope_deltas = rope_deltas
         # then use the prev pre-calculated rope-deltas to get the correct position ids
         else:
+            # cache_position[0]：代表当前 KV Cache 中已经存了多少个 Token。
+            # self.rope_deltas：这是你在上一段代码中存下的“时空跨度”。
+            # 含义：delta 算出的是“当前这个新 Token 应该从哪个物理位置开始排队”。它包含了之前所有文本和图片所占用的位置总和。
             batch_size, seq_length, _ = inputs_embeds.shape
             delta = (
                 (cache_position[0] + self.rope_deltas).to(inputs_embeds.device)
@@ -1499,15 +1548,17 @@ def qwen2_5_mixed_modality_forward_with_flce(
             position_ids = position_ids.view(1, -1).expand(batch_size, -1)
             if cache_position is not None:  # otherwise `deltas` is an int `0`
                 delta = delta.repeat_interleave(batch_size // delta.shape[0], dim=0)
+            # delta用于计算position_id 
             position_ids = position_ids.add(delta)
             position_ids = position_ids.unsqueeze(0).expand(3, -1, -1)
 
+    # 主模型前向传播
     outputs = self.model(
         input_ids=None,
         position_ids=position_ids,
         attention_mask=attention_mask,
         past_key_values=past_key_values,
-        inputs_embeds=inputs_embeds,
+        inputs_embeds=inputs_embeds, # 传入融合了文本和视觉特征的嵌入
         use_cache=use_cache,
         output_attentions=output_attentions,
         output_hidden_states=output_hidden_states,
@@ -1515,6 +1566,7 @@ def qwen2_5_mixed_modality_forward_with_flce(
         cache_position=cache_position,
     )
 
+    # outputs[0]通常是最后一个隐藏层状态
     hidden_states = outputs[0]
     
     loss = None
@@ -1527,10 +1579,12 @@ def qwen2_5_mixed_modality_forward_with_flce(
         # Flatten tokens
         shift_hidden_states = shift_hidden_states.view(-1, self.config.hidden_size)
         shift_labels = shift_labels.view(-1)
-
+        
+        # LigerFusedLinearCrossEntropyLoss是优化的融合损失函数，同时执行线性变换和交叉熵
         lce = LigerFusedLinearCrossEntropyLoss()
         loss = lce(self.lm_head.weight, shift_hidden_states, shift_labels)
     else:
+        # 推理时或非融合版本计算
         logits = self.lm_head(hidden_states)
         if labels is not None:
             # Upcast to float if we need to compute the loss to avoid potential precision issues
@@ -1545,11 +1599,13 @@ def qwen2_5_mixed_modality_forward_with_flce(
             # Enable model parallelism
             shift_labels = shift_labels.to(shift_logits.device)
             loss = loss_fct(shift_logits, shift_labels)
-
+    
+    # 传统模式：元组返回 (if not return_dict)
     if not return_dict:
         output = (logits,) + outputs[1:]
         return (loss,) + output if loss is not None else output
 
+    # 结构化对象返回
     return Qwen2_5_VLCausalLMOutputWithPast(
         loss=loss,
         logits=logits,
@@ -1561,6 +1617,8 @@ def qwen2_5_mixed_modality_forward_with_flce(
 
 
 # forward function without using fused linear cross entropy
+# 不使用融合线性交叉熵的前向传播
+# 始终计算logits，不使用融合损失
 def qwen2_5_mixed_modality_forward(
     self,
     input_ids: torch.LongTensor = None,

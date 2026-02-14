@@ -5,7 +5,6 @@ import logging
 
 def maybe_zero_3(param, ignore_status=False, name=None):
     ### 参数detach后收集
-
     from deepspeed import zero
     from deepspeed.runtime.zero.partition_parameters import ZeroParamStatus
     if hasattr(param, "ds_id"):

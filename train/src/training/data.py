@@ -672,8 +672,9 @@ class SupervisedDataset(Dataset):
                     # gpt_response = replace_pad_with_anchor_tokens(gpt_response)
                     # 第四阶段
                     import random
+                    # xxx = random.randint(0, 5)
                     xxx = random.randint(0, 5)
-                    if xxx == 0:
+                    if xxx == 100:
                         # 标准问答形式
                         user_input = f"{DEFAULT_IM_START_TOKEN}{user_input['role']}\n{user_input['content']}\n{DEFAULT_IM_END_TOKEN}\n{DEFAULT_IM_START_TOKEN}{gpt_response['role']}\n"
                         gpt_response = f"{gpt_response['content']}\n{DEFAULT_IM_END_TOKEN}\n"
